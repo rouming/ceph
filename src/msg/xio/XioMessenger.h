@@ -26,7 +26,7 @@ extern "C" {
 
 #include "XioConnection.h"
 #include "XioPortal.h"
-#include "QueueStrategy.h"
+#include "msg/QueueStrategy.h"
 #include "common/Thread.h"
 #include "common/Mutex.h"
 #include "include/Spinlock.h"

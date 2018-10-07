@@ -34,8 +34,9 @@ function(do_build_boost version)
 
   string(REPLACE ";" "," boost_with_libs "${Boost_BUILD_COMPONENTS}")
   # build b2 and prepare the project-config.jam for boost
+#  message(SEND_ERROR "#################### " ./bootstrap.sh --prefix=<INSTALL_DIR> --with-python=/usr/bin/python2 --with-libraries=${boost_with_libs})
   set(configure_command
-    ./bootstrap.sh --prefix=<INSTALL_DIR>
+    ./bootstrap.sh --prefix=<INSTALL_DIR> --with-python=/usr/bin/python2
     --with-libraries=${boost_with_libs})
 
   set(b2 ./b2)

@@ -534,7 +534,7 @@ struct inode_t {
 	      last_scrub_version(0), backtrace_version(0) {
     clear_layout();
     memset(&dir_layout, 0, sizeof(dir_layout));
-    memset(&quota, 0, sizeof(quota));
+    memset((void *)&quota, 0, sizeof(quota));
   }
 
   // file type

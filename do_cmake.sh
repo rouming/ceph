@@ -15,6 +15,8 @@ mkdir build
 cd build
 cmake -DBOOST_J=$(nproc) $ARGS "$@" ..
 
+#-DWITH_XIO=ON -DWITH_RDMA=ON -DXIO_INCLUDE_DIR=~/devel/accelio/include -DXIO_LIBRARY="-L~/devel/accelio/src/usr/.libs -lxio"
+
 # minimal config to find plugins
 cat <<EOF > ceph.conf
 plugin dir = lib
