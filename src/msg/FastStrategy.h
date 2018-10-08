@@ -15,7 +15,9 @@
 
 #ifndef FAST_STRATEGY_H
 #define FAST_STRATEGY_H
+
 #include "DispatchStrategy.h"
+#include "msg/Messenger.h"
 
 class FastStrategy : public DispatchStrategy {
 public:

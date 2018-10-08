@@ -44,7 +44,7 @@ protected:
 class XioMessenger : public SimplePolicyMessenger, XioInit
 {
 private:
-  static std::atomic<uint64_t> nInstances = { 0 };
+  static std::atomic<uint64_t> nInstances;
   std::atomic<uint64_t> nsessions = { 0 };
   std::atomic<bool> shutdown_called = { false };
   Spinlock conns_sp;
@@ -112,7 +112,9 @@ public:
   virtual void set_cluster_protocol(int p)
     { }
 
-  virtual int bind(const entity_addr_t& addr);
+  virtual int bind(const entity_addr_t& addr) override;
+  virtual int client_bind(const entity_addr_t& bind_addr) override;
+
 
   virtual int rebind(const set<int>& avoid_ports);
 

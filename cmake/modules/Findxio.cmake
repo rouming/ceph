@@ -13,7 +13,7 @@ else()
   find_library(XIO_LIBRARY xio)
 endif()
 
-set(XIO_LIBRARIES ${XIO_LIBRARY})
+set(XIO_LIBRARIES ${XIO_LIBRARY} numa)
 
 include(FindPackageHandleStandardArgs)
 find_package_handle_standard_args(xio DEFAULT_MSG XIO_LIBRARY XIO_INCLUDE_DIR)

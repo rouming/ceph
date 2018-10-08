@@ -159,9 +159,9 @@ int XioConnection::send_message(Message *m)
 void XioConnection::send_keepalive_or_ack(bool ack, const utime_t *tp)
 {
   /* If con is not in READY state, we need to queue the request */
-  if (cstate.session_state.read() != XioConnection::UP) {
+  if (cstate.session_state != session_states::UP) {
     pthread_spin_lock(&sp);
-    if (cstate.session_state.read() != XioConnection::UP) {
+    if (cstate.session_state != session_states::UP) {
       if (ack) {
 	outgoing.ack = true;
 	outgoing.ack_time = *tp;
@@ -578,8 +578,8 @@ int XioConnection::on_ow_msg_send_complete(struct xio_session *session,
   --send_ctr; /* atomic, because portal thread */
 
   /* unblock flow-controlled connections, avoid oscillation */
-  if (unlikely(cstate.session_state.read() ==
-	       XioConnection::FLOW_CONTROLLED)) {
+  if (unlikely(cstate.session_state ==
+	       session_states::FLOW_CONTROLLED)) {
     if ((send_ctr <= uint32_t(xio_qdepth_low_mark())) &&
 	(1 /* XXX memory <= memory low-water mark */))  {
       cstate.state_up_ready(XioConnection::CState::OP_FLAG_NONE);
@@ -822,8 +822,8 @@ int XioConnection::CState::state_fail(Message* m, uint32_t flags)
     pthread_spin_lock(&xcon->sp);
 
   // advance to state FAIL, drop queued, msgs, adjust LRU
-  session_state = session_states::DISCONNECTED);
-  startup_state = session_startup_states::FAIL);
+  session_state = session_states::DISCONNECTED;
+  startup_state = session_startup_states::FAIL;
 
   xcon->discard_out_queues(flags|OP_FLAG_LOCKED);
   xcon->adjust_clru(flags|OP_FLAG_LOCKED|OP_FLAG_LRU);

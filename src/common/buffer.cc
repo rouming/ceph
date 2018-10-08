@@ -743,7 +743,7 @@ static std::atomic_flag buffer_debug_lock = ATOMIC_FLAG_INIT;
     }
   };
 
-  struct xio_reg_mem* get_xio_mp(const buffer::ptr& bp)
+  struct xio_reg_mem* ceph::get_xio_mp(const buffer::ptr& bp)
   {
     buffer::xio_mempool *mb = dynamic_cast<buffer::xio_mempool*>(bp.get_raw());
     if (mb) {

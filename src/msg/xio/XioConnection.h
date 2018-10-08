@@ -137,8 +137,8 @@ private:
     XioConnection *xcon;
     uint32_t protocol_version;
 
-    std::atomic<session_states> session_state = { 0 };
-    std::atomic<session_startup_state> startup_state = { 0 };
+    session_states session_state;
+    session_startup_states startup_state;
 
     uint32_t reconnects;
     uint32_t connect_seq, global_seq, peer_global_seq;
@@ -152,8 +152,8 @@ private:
 	authorizer(NULL),
 	xcon(_xcon),
 	protocol_version(0),
-	session_state(INIT),
-	startup_state(IDLE),
+	session_state(session_states::INIT),
+	startup_state(session_startup_states::IDLE),
 	reconnects(0),
 	connect_seq(0),
 	global_seq(0),
@@ -162,11 +162,11 @@ private:
 	out_seq_acked(0),
 	flags(FLAG_NONE) {}
 
-    uint64_t get_session_state() {
+    enum session_states get_session_state() {
       return session_state;
     }
 
-    uint64_t get_startup_state() {
+    enum session_startup_states get_startup_state() {
       return startup_state;
     }
 

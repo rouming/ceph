@@ -263,7 +263,7 @@ endif()
 
 if(HAVE_XIO)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -I${XIO_INCLUDE_DIR}")
-  list(APPEND EXTRALIBS ${XIO_LIBRARY} pthread rt)
+  list(APPEND EXTRALIBS ${XIO_LIBRARIES} pthread rt)
 endif(HAVE_XIO)
 
 if(HAVE_RDMA)
@@ -634,6 +634,9 @@ set(ceph_common_deps
   ${CMAKE_DL_LIBS})
 if(HAVE_RDMA)
   list(APPEND ceph_common_deps ${RDMA_LIBRARY})
+endif()
+if(HAVE_XIO)
+  list(APPEND ceph_common_deps ${XIO_LIBRARIES})
 endif()
 if(NOT WITH_SYSTEM_BOOST)
   list(APPEND ceph_common_deps ${ZLIB_LIBRARIES})

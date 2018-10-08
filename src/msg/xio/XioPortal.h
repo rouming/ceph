@@ -311,7 +311,7 @@ public:
 		  break;
 		};
 	      } else {
-		xcon->send.set(msg->timestamp); // need atomic?
+		xcon->send.store(msg->timestamp); // need atomic?
 		xcon->send_ctr += xsend->get_msg_count(); // only inc if cb promised
 	      }
 	      break;

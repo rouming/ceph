@@ -21,9 +21,9 @@ using namespace std;
 
 #include "common/config.h"
 #include "msg/msg_types.h"
+#include "msg/FastStrategy.h"
+#include "msg/QueueStrategy.h"
 #include "msg/xio/XioMessenger.h"
-#include "msg/xio/FastStrategy.h"
-#include "msg/xio/QueueStrategy.h"
 #include "msg/xio/XioMsg.h"
 #include "messages/MPing.h"
 #include "common/Timer.h"

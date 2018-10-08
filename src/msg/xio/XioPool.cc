@@ -25,17 +25,17 @@ void XioPoolStats::dump(const char* tag, uint64_t serial)
   std::cout
     << tag << " #" << serial << ": "
     << "pool objs: "
-    << "64: " << ctr_set[SLAB_64].read() << " "
-    << "256: " << ctr_set[SLAB_256].read() << " "
-    << "1024: " << ctr_set[SLAB_1024].read() << " "
-    << "page: " << ctr_set[SLAB_PAGE].read() << " "
-    << "max: " << ctr_set[SLAB_MAX].read() << " "
-    << "overflow: " << ctr_set[SLAB_OVERFLOW].read() << " "
+    << "64: " << ctr_set[SLAB_64].load() << " "
+    << "256: " << ctr_set[SLAB_256].load() << " "
+    << "1024: " << ctr_set[SLAB_1024].load() << " "
+    << "page: " << ctr_set[SLAB_PAGE].load() << " "
+    << "max: " << ctr_set[SLAB_MAX].load() << " "
+    << "overflow: " << ctr_set[SLAB_OVERFLOW].load() << " "
     << std::endl;
   std::cout
     << tag << " #" << serial << ": "
     << " msg objs: "
-    << "in: " << hook_cnt.read() << " "
-    << "out: " << msg_cnt.read() << " "
+    << "in: " << hook_cnt.load() << " "
+    << "out: " << msg_cnt.load() << " "
     << std::endl;
 }

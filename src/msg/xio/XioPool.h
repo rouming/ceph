@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
+#include <assert.h>
 
 extern "C" {
 #include "libxio.h"
@@ -178,7 +179,7 @@ static inline int xpool_alloc(struct xio_mempool *pool, uint64_t size,
   int r = xio_mempool_alloc(pool, size, mp);
   if (r == 0) {
     if (unlikely(XioPool::trace_mempool))
-      xp_stats += size;
+      xp_stats.inc(size);
     return 0;
   }
   // fall back to malloc on errors
@@ -194,7 +195,7 @@ static inline void xpool_free(uint64_t size, struct xio_reg_mem* mp)
 {
   if (mp->length) {
     if (unlikely(XioPool::trace_mempool))
-      xp_stats -= size;
+      xp_stats.dec(size);
     xio_mempool_free(mp);
   } else { // from malloc
     if (unlikely(XioPool::trace_mempool))

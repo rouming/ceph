@@ -32,7 +32,7 @@
 Mutex mtx("XioMessenger Package Lock");
 std::atomic<bool> initialized = { false };
 
-std::atomic<unsigned> XioMessenger::nInstances = { 0 };
+std::atomic<uint64_t> XioMessenger::nInstances = { 0 };
 
 struct xio_mempool *xio_msgr_noreg_mpool;
 
@@ -274,7 +274,7 @@ void XioInit::package_init(CephContext *cct) {
                   &xopt, sizeof(xopt));
 
        /* and set threshold for buffer callouts */
-       xopt = max(cct->_conf->xio_max_send_inline, 512);
+       xopt = max(cct->_conf->xio_max_send_inline, (int64_t)512);
        xio_set_opt(NULL, XIO_OPTLEVEL_ACCELIO, XIO_OPTNAME_MAX_INLINE_XIO_DATA,
                   &xopt, sizeof(xopt));
 
@@ -400,9 +400,9 @@ int XioMessenger::get_nconns_per_portal(uint64_t cflags)
   int nconns = XIO_DEFAULT_NUM_CONNS_PER_PORTAL;
 
   if (cflags & Messenger::HAS_MANY_CONNECTIONS)
-    nconns = max(cct->_conf->xio_max_conns_per_portal, XIO_DEFAULT_NUM_CONNS_PER_PORTAL);
+    nconns = max(cct->_conf->xio_max_conns_per_portal, (int64_t)XIO_DEFAULT_NUM_CONNS_PER_PORTAL);
   else if (cflags & Messenger::HEARTBEAT)
-    nconns = max(cct->_conf->osd_heartbeat_min_peers * 4, XIO_DEFAULT_NUM_CONNS_PER_PORTAL);
+    nconns = max(cct->_conf->osd_heartbeat_min_peers * 4, (int64_t)XIO_DEFAULT_NUM_CONNS_PER_PORTAL);
 
   return nconns;
 }
@@ -412,7 +412,7 @@ int XioMessenger::get_nportals(uint64_t cflags)
   int nportals = 1;
 
   if (cflags & Messenger::HAS_HEAVY_TRAFFIC)
-    nportals = max(cct->_conf->xio_portal_threads, 1);
+    nportals = max(cct->_conf->xio_portal_threads, (int64_t)1);
 
   return nportals;
 }
@@ -729,6 +729,12 @@ int XioMessenger::bind(const entity_addr_t& addr)
   return r;
 } /* bind */
 
+int XioMessenger::client_bind(const entity_addr_t &bind_addr)
+{
+  // same as bind
+  return bind(bind_addr);
+}
+
 int XioMessenger::rebind(const set<int>& avoid_ports)
 {
   ldout(cct,4) << "XioMessenger " << this << " rebind attempt" << dendl;
@@ -799,9 +805,9 @@ int XioMessenger::_send_message(Message *m, Connection *con)
   XioConnection *xcon = static_cast<XioConnection*>(con);
 
   /* If con is not in READY state, we have to enforce policy */
-  if (xcon->cstate.session_state.read() != XioConnection::UP) {
+  if (xcon->cstate.session_state != XioConnection::session_states::UP) {
     pthread_spin_lock(&xcon->sp);
-    if (xcon->cstate.session_state.read() != XioConnection::UP) {
+    if (xcon->cstate.session_state != XioConnection::session_states::UP) {
       xcon->outgoing.mqueue.push_back(*m);
       pthread_spin_unlock(&xcon->sp);
       return 0;
@@ -934,7 +940,7 @@ assert(req->out.pdata_iov.nents || !nbuffers);
   xmsg->trace = m->trace;
   m->trace.event("xio portal enqueue for send");
   m->trace.keyval("xio message segments", xmsg->hdr.msg_cnt);
-  xcon->portal->enqueue_for_send(xcon, xmsg);
+//XXX  xcon->portal->enqueue_for_send(xcon, xmsg);
 
   return code;
 } /* send_message(Message *, Connection *) */
