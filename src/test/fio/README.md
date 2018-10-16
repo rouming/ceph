@@ -71,3 +71,32 @@ this README.
 To run:
 
     ./fio /path/to/job.fio
+
+
+Messenger
+---------
+
+This fio engine allows you to test CEPH messenger transport layer, without
+any disk activities involved.
+
+To build fio_ceph_messenger:
+```
+  mkdir build && cd build
+  cmake -DWITH_FIO=ON -DFIO_INCLUDE_DIR=/path/to/fio -DCMAKE_BUILD_TYPE=Release /path/to/ceph
+  make -C src/test/fio install
+```
+If you install the ceph libraries to a location that isn't in your
+LD_LIBRARY_PATH, be sure to add it:
+
+    export LD_LIBRARY_PATH=/path/to/install/lib
+
+To view the fio options specific to the messenger engine:
+
+    ./fio --enghelp=libfio_ceph_messenger.so
+
+The ceph_conf_file= option requires a ceph configuration file (ceph.conf),
+see ceph-messenger.conf and ceph-messenger.fio for details.
+
+To run:
+
+    ./fio ./ceph-messenger.fio
