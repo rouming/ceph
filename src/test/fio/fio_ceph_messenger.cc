@@ -18,6 +18,8 @@
 #include <flist.h>
 #include <optgroup.h>
 
+#include "include/assert.h" // fio.h clobbers our assert.h
+
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_
 
@@ -115,7 +117,7 @@ static void create_or_get_ceph_context(struct ceph_msgr_options *o)
   cct.detach();
 
   common_init_finish(g_ceph_context);
-  g_ceph_context->_conf.apply_changes(NULL);
+  g_ceph_context->_conf->apply_changes(NULL);
 }
 
 static void put_ceph_context(void)
@@ -209,7 +211,6 @@ public:
   FioDispatcher(struct ceph_msgr_data *data):
     Dispatcher(g_ceph_context),
     m_data(data) {
-    require_authorizer = false;
   }
   bool ms_can_fast_dispatch_any() const override {
     return true;
@@ -264,8 +265,11 @@ public:
   bool ms_handle_refused(Connection *con) override {
     return false;
   }
-  int ms_handle_authentication(Connection *con) override {
-    return 1;
+  bool ms_verify_authorizer(Connection *con, int peer_type, int protocol,
+			    bufferlist& authorizer, bufferlist& authorizer_reply,
+			    bool& isvalid, CryptoKey& session_key) override {
+    isvalid = true;
+    return true;
   }
 };
 
@@ -296,7 +300,7 @@ static Messenger *create_messenger(struct ceph_msgr_options *o)
 
   std::string ms_type = o->ms_type != CEPH_MSGR_TYPE_UNDEF ?
     ceph_msgr_types[o->ms_type] :
-    g_ceph_context->_conf.get_val<std::string>("ms_type");
+    g_ceph_context->_conf->get_val<std::string>("ms_type");
 
   Messenger *msgr = Messenger::create(g_ceph_context, ms_type.c_str(),
 				      ename, lname, 0, flags);
@@ -388,7 +392,13 @@ static int fio_ceph_msgr_setup(struct thread_data *td)
   create_or_get_ceph_context(o);
 
   if (!td->io_ops_data) {
-    data = new ceph_msgr_data(o, td->o.iodepth);
+    void *buf;
+    int rc;
+
+    rc = posix_memalign(&buf, L1_CACHE_BYTES, sizeof(ceph_msgr_data));
+    if (rc)
+      return -ENOMEM;
+    data = new (buf) ceph_msgr_data(o, td->o.iodepth);
     init_messenger(data);
     td->io_ops_data = (void *)data;
   }
@@ -420,7 +430,8 @@ static void fio_ceph_msgr_cleanup(struct thread_data *td)
     fprintf(stderr, "fio: io_pending_list is not empty\n");
 
   ring_buffer_deinit(&data->io_completed_q);
-  delete data;
+  free(data);
+//  delete data;
   put_ceph_context();
 }
 
