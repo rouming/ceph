@@ -2428,6 +2428,18 @@ void AsyncConnection::_append_keepalive_or_ack(bool ack, utime_t *tp)
   }
 }
 
+static inline unsigned long long nsecs_epoch(void)
+{
+	struct timespec ts;
+	unsigned long long nsecs;
+
+	clock_gettime(CLOCK_REALTIME, &ts);
+	nsecs  = ts.tv_sec * 1000000000ull;
+	nsecs += ts.tv_nsec;
+
+	return nsecs;
+}
+
 void AsyncConnection::handle_write()
 {
   ldout(async_msgr->cct, 10) << __func__ << dendl;
@@ -2448,6 +2460,9 @@ void AsyncConnection::handle_write()
       if (!m)
         break;
 
+      if (m->SUBM_NS)
+	m->SUBM_NS = nsecs_epoch() - m->SUBM_NS;
+
       if (!policy.lossy) {
         // put on sent list
         sent.push_back(m);
@@ -2465,6 +2480,11 @@ void AsyncConnection::handle_write()
         ldout(async_msgr->cct, 1) << __func__ << " send msg failed" << dendl;
         goto fail;
       }
+
+      if (m->SUBM_AND_WR_NS)
+	m->SUBM_AND_WR_NS = nsecs_epoch() - m->SUBM_AND_WR_NS;
+
+
       write_lock.lock();
       if (r > 0)
         break;

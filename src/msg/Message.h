@@ -254,6 +254,9 @@ public:
   void encode_trace(bufferlist &bl, uint64_t features) const;
   void decode_trace(bufferlist::iterator &p, bool create = false);
 
+  unsigned long long SUBM_NS = 0;
+  unsigned long long SUBM_AND_WR_NS = 0;
+
   class CompletionHook : public Context {
   protected:
     Message *m;

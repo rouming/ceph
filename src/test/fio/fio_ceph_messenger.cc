@@ -54,6 +54,10 @@ struct ceph_msgr_data {
     pthread_spin_init(&spin, PTHREAD_PROCESS_PRIVATE);
   }
 
+  unsigned long long nr_sent = 0;
+  unsigned long long SUBM_NS = 0;
+  unsigned long long SUBM_AND_WR_NS = 0;
+
   struct ceph_msgr_options *o;
   Messenger *msgr = NULL;
   FioDispatcher *disp = NULL;
@@ -414,6 +418,15 @@ static void fio_ceph_msgr_cleanup(struct thread_data *td)
   data = (typeof(data))td->io_ops_data;
   put_messenger(data);
 
+  printf(">>>>> nr_sent=%llu, SUBM=%llu ns, SUBM_AND_WR=%llu ns, WR=%llu ns\n",
+	 data->nr_sent, data->SUBM_NS, data->SUBM_AND_WR_NS,
+	 data->SUBM_AND_WR_NS - data->SUBM_NS);
+
+  printf(">>>>> avg SUBM=%.2f ns, avg SUBM_AND_WR=%.2f ns, WR=%.2f ns\n",
+	 (double)data->SUBM_NS/data->nr_sent,
+	 (double)data->SUBM_AND_WR_NS/data->nr_sent,
+	 (double)(data->SUBM_AND_WR_NS - data->SUBM_NS)/data->nr_sent);
+
   nr = ring_buffer_used_size(&data->io_completed_q);
   if (nr)
     fprintf(stderr, "fio: io_completed_nr==%d, but should be zero\n",
@@ -477,6 +490,20 @@ static void fio_ceph_msgr_io_u_free(struct thread_data *td, struct io_u *io_u)
   }
 }
 
+
+static inline unsigned long long nsecs_epoch(void)
+{
+	struct timespec ts;
+	unsigned long long nsecs;
+
+	clock_gettime(CLOCK_REALTIME, &ts);
+	nsecs  = ts.tv_sec * 1000000000ull;
+	nsecs += ts.tv_nsec;
+
+	return nsecs;
+}
+
+
 static enum fio_q_status ceph_msgr_sender_queue(struct thread_data *td,
 						struct io_u *io_u)
 {
@@ -488,6 +515,13 @@ static enum fio_q_status ceph_msgr_sender_queue(struct thread_data *td,
 
   io = (typeof(io))io_u->engine_data;
   data = (typeof(data))td->io_ops_data;
+
+  if (io->req_msg->SUBM_NS) {
+    data->SUBM_NS += io->req_msg->SUBM_NS;
+    data->SUBM_AND_WR_NS += io->req_msg->SUBM_AND_WR_NS;
+    data->nr_sent++;
+  }
+  io->req_msg->SUBM_NS = io->req_msg->SUBM_AND_WR_NS = nsecs_epoch();
 
   /* No handy method to clear ops before reusage? Ok */
   io->req_msg->ops.clear();
