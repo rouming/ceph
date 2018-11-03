@@ -497,6 +497,7 @@ void AsyncConnection::process()
       case STATE_OPEN_MESSAGE_THROTTLE_MESSAGE:
         {
           if (policy.throttler_messages) {
+	    assert(0);
             ldout(async_msgr->cct, 10) << __func__ << " wants " << 1 << " message from policy throttler "
                                        << policy.throttler_messages->get_current() << "/"
                                        << policy.throttler_messages->get_max() << dendl;
@@ -519,12 +520,16 @@ void AsyncConnection::process()
       case STATE_OPEN_MESSAGE_THROTTLE_BYTES:
         {
           cur_msg_size = current_header.front_len + current_header.middle_len + current_header.data_len;
+	  ///XXXX
+	  cur_msg_size = 0;
           if (cur_msg_size) {
             if (policy.throttler_bytes) {
+	      assert(0);
               ldout(async_msgr->cct, 10) << __func__ << " wants " << cur_msg_size << " bytes from policy throttler "
                                          << policy.throttler_bytes->get_current() << "/"
                                          << policy.throttler_bytes->get_max() << dendl;
               if (!policy.throttler_bytes->get_or_fail(cur_msg_size)) {
+		assert(0);
                 ldout(async_msgr->cct, 10) << __func__ << " wants " << cur_msg_size << " bytes from policy throttler "
                                            << policy.throttler_bytes->get_current() << "/"
                                            << policy.throttler_bytes->get_max() << " failed, just wait." << dendl;
@@ -545,6 +550,7 @@ void AsyncConnection::process()
         {
           if (cur_msg_size) {
             if (!dispatch_queue->dispatch_throttler.get_or_fail(cur_msg_size)) {
+	      assert(0);
               ldout(async_msgr->cct, 10) << __func__ << " wants " << cur_msg_size << " bytes from dispatch throttle "
                                          << dispatch_queue->dispatch_throttler.get_current() << "/"
                                          << dispatch_queue->dispatch_throttler.get_max() << " failed, just wait." << dendl;
