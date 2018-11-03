@@ -179,15 +179,17 @@ static std::atomic_flag buffer_debug_lock = ATOMIC_FLAG_INIT;
 
     explicit raw(unsigned l)
       : data(NULL), len(l), nref(0) {
-      mempool::get_pool(mempool::pool_index_t(mempool)).adjust_count(1, len);
+//      mempool::get_pool(mempool::pool_index_t(mempool)).adjust_count(1, len);
     }
     raw(char *c, unsigned l)
       : data(c), len(l), nref(0) {
-      mempool::get_pool(mempool::pool_index_t(mempool)).adjust_count(1, len);
+      //XXX
+//      mempool::get_pool(mempool::pool_index_t(mempool)).adjust_count(1, len);
     }
     virtual ~raw() {
-      mempool::get_pool(mempool::pool_index_t(mempool)).adjust_count(
-	-1, -(int)len);
+      //XXX
+//      mempool::get_pool(mempool::pool_index_t(mempool)).adjust_count(
+//	-1, -(int)len);
     }
 
     void _set_len(unsigned l) {
