@@ -248,6 +248,7 @@ public:
     OSDOp::merge_osd_op_vector_in_data(ops, data);
 
     if ((features & CEPH_FEATURE_OBJECTLOCATOR) == 0) {
+      assert(0);
       // here is the old structure we are encoding to: //
 #if 0
 struct ceph_osd_request_head {
@@ -299,6 +300,7 @@ struct ceph_osd_request_head {
       ::encode_nohead(hobj.oid.name, payload);
       ::encode_nohead(snaps, payload);
     } else if ((features & CEPH_FEATURE_NEW_OSDOP_ENCODING) == 0) {
+      assert(0);
       header.version = 6;
       ::encode(client_inc, payload);
       ::encode(osdmap_epoch, payload);
@@ -329,6 +331,7 @@ struct ceph_osd_request_head {
 	::encode(osd_reqid_t(), payload);
       }
     } else if (!HAVE_FEATURE(features, RESEND_ON_SPLIT)) {
+      assert(0);
       // reordered, v7 message encoding
       header.version = 7;
       ::encode(get_raw_pg(), payload);

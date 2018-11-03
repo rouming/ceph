@@ -147,6 +147,8 @@ AsyncConnection::AsyncConnection(CephContext *cct, AsyncMessenger *m, DispatchQu
 AsyncConnection::~AsyncConnection()
 {
   assert(out_q.empty());
+  assert(!out_head);
+  assert(!out_tail);
   assert(sent.empty());
   delete authorizer;
   if (recv_buf)
@@ -766,6 +768,7 @@ void AsyncConnection::process()
 				    << " " << *message << dendl;
 
           if (!policy.lossy) {
+	    assert(0);
             ack_left++;
             need_dispatch_writer = true;
           }
@@ -860,6 +863,7 @@ ssize_t AsyncConnection::_process_connection()
     case STATE_WAIT_SEND:
       {
         std::lock_guard<std::mutex> l(write_lock);
+	assert(0);
         if (!outcoming_bl.length()) {
           assert(state_after_send);
           state = state_after_send;
@@ -1910,6 +1914,7 @@ int AsyncConnection::send_message(Message *m)
     OID_EVENT_TRACE_WITH_MSG(m, "SEND_MSG_OSD_OPREPLY_BEGIN", true);
 
   if (async_msgr->get_myaddr() == get_peer_addr()) { //loopback connection
+    assert(0);
     ldout(async_msgr->cct, 20) << __func__ << " " << *m << " local" << dendl;
     std::lock_guard<std::mutex> l(write_lock);
     if (can_write != WriteStatus::CLOSED) {
@@ -1927,34 +1932,24 @@ int AsyncConnection::send_message(Message *m)
   // may disturb users
   logger->inc(l_msgr_send_messages);
 
-  bufferlist bl;
-  uint64_t f = get_features();
-
-  // TODO: Currently not all messages supports reencode like MOSDMap, so here
-  // only let fast dispatch support messages prepare message
-  bool can_fast_prepare = async_msgr->ms_can_fast_dispatch(m);
-  if (can_fast_prepare)
-    prepare_send_message(f, m, bl);
-
   std::lock_guard<std::mutex> l(write_lock);
-  // "features" changes will change the payload encoding
-  if (can_fast_prepare && (can_write == WriteStatus::NOWRITE || get_features() != f)) {
-    // ensure the correctness of message encoding
-    bl.clear();
-    m->get_payload().clear();
-    ldout(async_msgr->cct, 5) << __func__ << " clear encoded buffer previous "
-                              << f << " != " << get_features() << dendl;
-  }
+
   if (can_write == WriteStatus::CLOSED) {
     ldout(async_msgr->cct, 10) << __func__ << " connection closed."
                                << " Drop message " << m << dendl;
-    m->put();
+    m->complete();
   } else {
-    m->trace.event("async enqueueing message");
-    out_q[m->get_priority()].emplace_back(std::move(bl), m);
+    m->next = NULL;
+    if (out_tail)
+      out_tail->next = m;
+    out_tail = m;
+    if (!out_head)
+      out_head = m;
+
     ldout(async_msgr->cct, 15) << __func__ << " inline write is denied, reschedule m=" << m << dendl;
-    if (can_write != WriteStatus::REPLACING)
+    if (can_write != WriteStatus::REPLACING) {
       center->dispatch_event_external(write_handler);
+    }
   }
   return 0;
 }
@@ -2223,6 +2218,7 @@ ssize_t AsyncConnection::write_message(Message *m, bufferlist& bl, bool more)
     outcoming_bl.append((char*)&header, sizeof(header));
   } else {
     ceph_msg_header_old oldheader;
+    assert(0);
     memcpy(&oldheader, &header, sizeof(header));
     oldheader.src.name = header.src;
     oldheader.src.addr = get_peer_addr();
@@ -2240,6 +2236,7 @@ ssize_t AsyncConnection::write_message(Message *m, bufferlist& bl, bool more)
                              << " off " << header.data_off << dendl;
 
   if ((bl.length() <= ASYNC_COALESCE_THRESHOLD) && (bl.buffers().size() > 1)) {
+    assert(0);
     for (const auto &pb : bl.buffers()) {
       outcoming_bl.append((char*)pb.c_str(), pb.length());
     }
@@ -2252,6 +2249,7 @@ ssize_t AsyncConnection::write_message(Message *m, bufferlist& bl, bool more)
   if (has_feature(CEPH_FEATURE_MSG_AUTH)) {
     outcoming_bl.append((char*)&footer, sizeof(footer));
   } else {
+    assert(0);
     if (msgr->crcflags & MSG_CRC_HEADER) {
       old_footer.front_crc = footer.front_crc;
       old_footer.middle_crc = footer.middle_crc;
@@ -2276,6 +2274,7 @@ ssize_t AsyncConnection::write_message(Message *m, bufferlist& bl, bool more)
     logger->inc(l_msgr_send_bytes, total_send_size - original_bl_len);
     ldout(async_msgr->cct, 10) << __func__ << " sending " << m << " done." << dendl;
   } else {
+    assert(0);
     logger->inc(l_msgr_send_bytes, total_send_size - outcoming_bl.length());
     ldout(async_msgr->cct, 10) << __func__ << " sending " << m << " continuely." << dendl;
   }
@@ -2414,6 +2413,7 @@ void AsyncConnection::mark_down()
 void AsyncConnection::_append_keepalive_or_ack(bool ack, utime_t *tp)
 {
   ldout(async_msgr->cct, 10) << __func__ << dendl;
+  assert(0);
   if (ack) {
     assert(tp);
     struct ceph_timespec ts;
@@ -2456,37 +2456,100 @@ void AsyncConnection::handle_write()
     }
 
     auto start = ceph::mono_clock::now();
-    bool more;
+    unsigned long long now = nsecs_epoch();
     do {
-      bufferlist data;
-      Message *m = _get_next_outgoing(&data);
-      if (!m)
-        break;
+      struct iovec iovec[1024];
+      struct msghdr msghdr;
 
-      if (m->SUBM_NS)
-	m->SUBM_NS = nsecs_epoch() - m->SUBM_NS;
+      Message *msgs_head;
 
-      if (!policy.lossy) {
-        // put on sent list
-        sent.push_back(m);
-        m->get();
-      }
-      more = _has_next_outgoing();
+      msgs_head = out_head;
+      if (!msgs_head)
+	break;
+
+      out_head = NULL;
+      out_tail = NULL;
+
       write_lock.unlock();
 
-      // send_message or requeue messages may not encode message
-      if (!data.length())
-        prepare_send_message(get_features(), m, data);
+      Message *m;
+      unsigned buf_cnt = 0, buf_len = 0;
+      for (m = msgs_head; m; m = m->next) {
+	assert(buf_cnt < ARRAY_SIZE(iovec));
 
-      r = write_message(m, data, more);
-      if (r < 0) {
-        ldout(async_msgr->cct, 1) << __func__ << " send msg failed" << dendl;
-        goto fail;
+	if (m->SUBM_NS)
+	  m->SUBM_NS = now - m->SUBM_NS;
+
+	m->encode(get_features(), msgr->crcflags);
+
+	m->set_seq(++out_seq);
+
+	if (msgr->crcflags & MSG_CRC_HEADER)
+	  m->calc_header_crc();
+
+	ceph_msg_header& header = m->get_header();
+	ceph_msg_footer& footer = m->get_footer();
+
+	iovec[buf_cnt].iov_base = &m->tag;
+	iovec[buf_cnt].iov_len = 1;
+	buf_len += 1;
+	buf_cnt++;
+
+	iovec[buf_cnt].iov_base = &header;
+	iovec[buf_cnt].iov_len = sizeof(header);
+	buf_len += sizeof(header);
+	buf_cnt++;
+
+	for (const auto &pb : m->get_payload().buffers()) {
+	  iovec[buf_cnt].iov_base = (void *)pb.c_str();
+	  iovec[buf_cnt].iov_len = pb.length();
+	  buf_len += pb.length();
+	  buf_cnt++;
+	}
+	for (const auto &pb : m->get_middle().buffers()) {
+	  iovec[buf_cnt].iov_base = (void *)pb.c_str();
+	  iovec[buf_cnt].iov_len = pb.length();
+	  buf_len += pb.length();
+	  buf_cnt++;
+	}
+	for (const auto &pb : m->get_data().buffers()) {
+	  iovec[buf_cnt].iov_base = (void *)pb.c_str();
+	  iovec[buf_cnt].iov_len = pb.length();
+	  buf_len += pb.length();
+	  buf_cnt++;
+	}
+
+	iovec[buf_cnt].iov_base = &footer;
+	iovec[buf_cnt].iov_len = sizeof(footer);
+	buf_len += sizeof(footer);
+	buf_cnt++;
       }
 
-      if (m->SUBM_AND_WR_NS)
-	m->SUBM_AND_WR_NS = nsecs_epoch() - m->SUBM_AND_WR_NS;
+      assert(buf_cnt < ARRAY_SIZE(iovec));
 
+      memset(&msghdr, 0, sizeof(msghdr));
+      msghdr.msg_iovlen = buf_cnt;
+      msghdr.msg_iov = iovec;
+
+//      printf(">>> buf_cnt=%d, buf_len=%d\n", buf_cnt, buf_len);
+
+      r = cs.send(msghdr, buf_len);
+
+      if (r != buf_len)
+	printf("!!!!!!! >>>>>>>>>>>> r(%zd) != (%d)buf_len\n", r, buf_len);
+
+      now = nsecs_epoch();
+      for (m = msgs_head; m; ) {
+	Message *next = m->next;
+
+	if (m->SUBM_AND_WR_NS)
+	  m->SUBM_AND_WR_NS = now - m->SUBM_AND_WR_NS;
+
+	//XXX m->put();
+	m->complete();
+
+	m = next;
+      }
 
       write_lock.lock();
       if (r > 0)
@@ -2496,14 +2559,7 @@ void AsyncConnection::handle_write()
 
     uint64_t left = ack_left;
     if (left) {
-      ceph_le64 s;
-      s = in_seq;
-      outcoming_bl.append(CEPH_MSGR_TAG_ACK);
-      outcoming_bl.append((char*)&s, sizeof(s));
-      ldout(async_msgr->cct, 10) << __func__ << " try send msg ack, acked " << left << " messages" << dendl;
-      ack_left -= left;
-      left = ack_left;
-      r = _try_send(left);
+      assert(0);
     } else if (is_queued()) {
       r = _try_send();
     }

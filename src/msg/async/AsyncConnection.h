@@ -96,7 +96,7 @@ class AsyncConnection : public Connection {
     return 0;
   }
   bool is_queued() const {
-    return !out_q.empty() || outcoming_bl.length();
+    return out_head || !out_q.empty() || outcoming_bl.length();
   }
   void shutdown_socket() {
     for (auto &&t : register_time_events)
@@ -318,6 +318,8 @@ class AsyncConnection : public Connection {
   std::atomic<WriteStatus> can_write;
   list<Message*> sent; // the first bufferlist need to inject seq
   map<int, list<pair<bufferlist, Message*> > > out_q;  // priority queue for outbound msgs
+  Message *out_head = NULL;
+  Message *out_tail = NULL;
   bool keepalive;
 
   std::mutex lock;

@@ -31,6 +31,7 @@ class ConnectedSocketImpl {
   virtual ssize_t read(char*, size_t) = 0;
   virtual ssize_t zero_copy_read(bufferptr&) = 0;
   virtual ssize_t send(bufferlist &bl, bool more) = 0;
+  virtual ssize_t send(struct msghdr &msghdrs, unsigned msg_cnt) { return -ENOTSUP; }
   virtual void shutdown() = 0;
   virtual void close() = 0;
   virtual int fd() const = 0;
@@ -103,7 +104,13 @@ class ConnectedSocket {
   ssize_t send(bufferlist &bl, bool more) {
     return _csi->send(bl, more);
   }
-  /// Disables output to the socket.
+
+  ssize_t send(struct msghdr &msghdr, unsigned buf_len) {
+    return _csi->send(msghdr, buf_len);
+  }
+
+
+/// Disables output to the socket.
   ///
   /// Current or future writes that have not been successfully flushed
   /// will immediately fail with an error.  This is useful to abort

@@ -164,7 +164,8 @@ class PosixConnectedSocketImpl final : public ConnectedSocketImpl {
       }
 
       sent += r;
-      if (len == sent) break;
+      if (len == sent)
+	break;
 
       while (r > 0) {
         if (msg.msg_iov[0].iov_len <= (size_t)r) {
@@ -182,6 +183,12 @@ class PosixConnectedSocketImpl final : public ConnectedSocketImpl {
     restore_sigpipe();
     return (ssize_t)sent;
   }
+
+  ssize_t send(struct msghdr &msghdr, unsigned buf_len) override {
+
+    return do_sendmsg(_fd, msghdr, buf_len, false);
+  }
+
 
   ssize_t send(bufferlist &bl, bool more) override {
     size_t sent_bytes = 0;

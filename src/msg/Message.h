@@ -249,6 +249,9 @@ protected:
   bi::list_member_hook<> dispatch_q;
 
 public:
+  Message *next = NULL;
+  char tag = CEPH_MSGR_TAG_MSG;
+
   // zipkin tracing
   ZTracer::Trace trace;
   void encode_trace(bufferlist &bl, uint64_t features) const;
