@@ -153,6 +153,30 @@ private:
   ~MOSDOpReply() override {}
 
 public:
+
+  void reply_on(const MOSDOp *req) {
+    oid = req->hobj.oid;
+    pgid = req->pgid.pgid;
+    ops = req->ops;
+
+    set_tid(req->get_tid());
+    result = 0;
+    flags =
+      (req->flags & ~(CEPH_OSD_FLAG_ONDISK|CEPH_OSD_FLAG_ONNVRAM|CEPH_OSD_FLAG_ACK));
+    osdmap_epoch = 0;
+    user_version = 0;
+    retry_attempt = req->get_retry_attempt();
+    do_redirect = false;
+
+    // zero out ops payload_len and possibly out data
+    for (unsigned i = 0; i < ops.size(); i++) {
+      ops[i].op.payload_len = 0;
+//      if (ignore_out_data)
+//	ops[i].outdata.clear();
+    }
+
+  }
+
   void encode_payload(uint64_t features) override {
 
     OSDOp::merge_osd_op_vector_out_data(ops, data);

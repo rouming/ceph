@@ -73,12 +73,12 @@ struct ceph_msgr_io {
   struct flist_head list;
   struct ceph_msgr_data *data;
   struct io_u *io_u;
-  MOSDOp *req_msg; /** Cached request, valid only for sender */
+  Message *msg;
 };
 
 struct ceph_msgr_reply_io {
   struct flist_head list;
-  MOSDOpReply *rep;
+  MOSDOp *req;
 };
 
 static void *str_to_ptr(const std::string &str)
@@ -160,33 +160,21 @@ static void ceph_msgr_sender_on_reply(const object_t &oid)
   ring_buffer_enqueue(&data->io_completed_q, (void *)io);
 }
 
+static void reply_complete_fn(Message *m)
+{
+  struct ceph_msgr_io *io;
 
-class ReplyCompletion : public Message::CompletionHook {
-  struct ceph_msgr_io *m_io;
-
-public:
-  ReplyCompletion(MOSDOpReply *rep, struct ceph_msgr_io *io) :
-    Message::CompletionHook(rep),
-    m_io(io) {
-  }
-  void finish(int err) override {
-    struct ceph_msgr_data *data = m_io->data;
-
-    ring_buffer_enqueue(&data->io_completed_q, (void *)m_io);
-  }
-};
+  io = (typeof(io))m->complete_data;
+  ring_buffer_enqueue(&io->data->io_completed_q, (void *)io);
+}
 
 static void ceph_msgr_receiver_on_request(struct ceph_msgr_data *data,
 					  MOSDOp *req)
 {
-  MOSDOpReply *rep;
-
-  rep = new MOSDOpReply(req, 0, 0, 0, false);
-  rep->set_connection(req->get_connection());
-
   pthread_spin_lock(&data->spin);
   if (data->io_inflight_nr) {
     struct ceph_msgr_io *io;
+    MOSDOpReply *rep;
 
     data->io_inflight_nr--;
     io = flist_first_entry(&data->io_inflight_list,
@@ -194,13 +182,20 @@ static void ceph_msgr_receiver_on_request(struct ceph_msgr_data *data,
     flist_del(&io->list);
     pthread_spin_unlock(&data->spin);
 
-    rep->set_completion_hook(new ReplyCompletion(rep, io));
+    rep = static_cast<typeof(rep)>(io->msg);
+    rep->set_connection(req->get_connection());
+    rep->reply_on(req);
+
+    rep->complete_data = (void *)io;
+    rep->complete_fn = reply_complete_fn;
     rep->get_connection()->send_message(rep);
   } else {
     struct ceph_msgr_reply_io *rep_io;
 
     rep_io = (typeof(rep_io))malloc(sizeof(*rep_io));
-    rep_io->rep = rep;
+
+    req->get();
+    rep_io->req = req;
 
     data->io_pending_nr++;
     flist_add_tail(&rep_io->list, &data->io_pending_list);
@@ -452,7 +447,7 @@ static int fio_ceph_msgr_io_u_init(struct thread_data *td, struct io_u *io_u)
 {
   struct ceph_msgr_options *o = (typeof(o))td->eo;
   struct ceph_msgr_io *io;
-  MOSDOp *req_msg = NULL;
+  Message *msg;
 
   io = (typeof(io))malloc(sizeof(*io));
   io->io_u = io_u;
@@ -467,11 +462,13 @@ static int fio_ceph_msgr_io_u_init(struct thread_data *td, struct io_u *io_u)
     spg_t spgid(pgid);
     entity_inst_t dest(entity_name_t::OSD(0), hostname_to_addr(o));
 
-    req_msg = new MOSDOp(0, 0, hobj, spgid, 0, 0, 0);
-    req_msg->set_connection(io->data->msgr->get_connection(dest));
+    msg = new MOSDOp(0, 0, hobj, spgid, 0, 0, 0);
+    msg->set_connection(io->data->msgr->get_connection(dest));
+  } else {
+    msg = new MOSDOpReply();
   }
 
-  io->req_msg = req_msg;
+  io->msg = msg;
   io_u->engine_data = (void *)io;
 
   return 0;
@@ -484,8 +481,7 @@ static void fio_ceph_msgr_io_u_free(struct thread_data *td, struct io_u *io_u)
   io = (typeof(io))io_u->engine_data;
   if (io) {
     io_u->engine_data = NULL;
-    if (io->req_msg)
-      io->req_msg->put();
+    io->msg->put();
     free(io);
   }
 }
@@ -509,6 +505,7 @@ static enum fio_q_status ceph_msgr_sender_queue(struct thread_data *td,
 {
   struct ceph_msgr_data *data;
   struct ceph_msgr_io *io;
+  MOSDOp *req_msg;
 
   bufferlist buflist = bufferlist::static_from_mem(
     (char *)io_u->buf, io_u->buflen);
@@ -516,21 +513,21 @@ static enum fio_q_status ceph_msgr_sender_queue(struct thread_data *td,
   io = (typeof(io))io_u->engine_data;
   data = (typeof(data))td->io_ops_data;
 
-  if (io->req_msg->SUBM_NS) {
-    data->SUBM_NS += io->req_msg->SUBM_NS;
-    data->SUBM_AND_WR_NS += io->req_msg->SUBM_AND_WR_NS;
+  if (io->msg->SUBM_NS) {
+    data->SUBM_NS += io->msg->SUBM_NS;
+    data->SUBM_AND_WR_NS += io->msg->SUBM_AND_WR_NS;
     data->nr_sent++;
   }
-  io->req_msg->SUBM_NS = io->req_msg->SUBM_AND_WR_NS = nsecs_epoch();
+  io->msg->SUBM_NS = io->msg->SUBM_AND_WR_NS = nsecs_epoch();
+
+  req_msg = static_cast<MOSDOp *>(io->msg);
 
   /* No handy method to clear ops before reusage? Ok */
-  io->req_msg->ops.clear();
+  req_msg->ops.clear();
 
   /* Here we do not care about direction, always send as write */
-  io->req_msg->write(0, io_u->buflen, buflist);
-  /* Keep message alive */
-  io->req_msg->get();
-  io->req_msg->get_connection()->send_message(io->req_msg);
+  req_msg->write(0, io_u->buflen, buflist);
+  req_msg->get_connection()->send_message(req_msg);
 
   return FIO_Q_QUEUED;
 }
@@ -589,16 +586,23 @@ static enum fio_q_status ceph_msgr_receiver_queue(struct thread_data *td,
   if (data->io_pending_nr) {
     struct ceph_msgr_reply_io *rep_io;
     MOSDOpReply *rep;
+    MOSDOp *req;
 
     data->io_pending_nr--;
     rep_io = flist_first_entry(&data->io_pending_list,
 			       typeof(*rep_io), list);
     flist_del(&rep_io->list);
-    rep = rep_io->rep;
+    req = rep_io->req;
     pthread_spin_unlock(&data->spin);
     free(rep_io);
 
-    rep->set_completion_hook(new ReplyCompletion(rep, io));
+    rep = static_cast<typeof(rep)>(io->msg);
+    rep->set_connection(req->get_connection());
+    rep->reply_on(req);
+    req->put();
+
+    rep->complete_data = (void *)io;
+    rep->complete_fn = reply_complete_fn;
     rep->get_connection()->send_message(rep);
   } else {
     data->io_inflight_nr++;

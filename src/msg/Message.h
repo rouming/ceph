@@ -309,6 +309,14 @@ public:
     return static_cast<Message *>(RefCountedObject::get());
   }
 
+  void (*complete_fn)(Message *m) = NULL;
+  void *complete_data = NULL;
+
+  virtual void complete() {
+    if (complete_fn)
+      complete_fn(this);
+  }
+
 protected:
   ~Message() override {
     if (byte_throttler)
