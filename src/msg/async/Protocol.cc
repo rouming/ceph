@@ -1162,7 +1162,9 @@ ssize_t ProtocolV1::write_message(Message *m, bufferlist &bl, bool more) {
     OID_EVENT_TRACE_WITH_MSG(m, "SEND_MSG_OSD_OP_END", false);
   else if (m->get_type() == CEPH_MSG_OSD_OPREPLY)
     OID_EVENT_TRACE_WITH_MSG(m, "SEND_MSG_OSD_OPREPLY_END", false);
-  m->put();
+  //XXX m->put();
+
+  m->complete();
 
   return rc;
 }
