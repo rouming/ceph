@@ -200,6 +200,9 @@ enum {
   l_msgr_running_recv_time,
   l_msgr_running_fast_dispatch_time,
 
+  l_msgr_queued_dequeued_time_avg,
+  l_msgr_issued_time_avg,
+
   l_msgr_last,
 };
 
@@ -239,6 +242,8 @@ class Worker {
     plb.add_time(l_msgr_running_send_time, "msgr_running_send_time", "The total time of message sending");
     plb.add_time(l_msgr_running_recv_time, "msgr_running_recv_time", "The total time of message receiving");
     plb.add_time(l_msgr_running_fast_dispatch_time, "msgr_running_fast_dispatch_time", "The total time of fast dispatch");
+    plb.add_time_avg(l_msgr_queued_dequeued_time_avg, "msgr_queued_dequeued_time_avg", "The total time of messages being in the write queue");
+    plb.add_time_avg(l_msgr_issued_time_avg, "msgr_issued_time_avg", "The total time of messages issuing to the stack");
 
     perf_logger = plb.create_perf_counters();
     cct->get_perfcounters_collection()->add(perf_logger);

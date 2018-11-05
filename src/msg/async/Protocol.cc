@@ -328,6 +328,10 @@ void ProtocolV1::write_event() {
         break;
       }
 
+      auto tp = ceph_clock_now();
+      connection->logger->tinc(l_msgr_queued_dequeued_time_avg,
+			       tp - m->get_queued_stamp());
+
       if (!connection->policy.lossy) {
         // put on sent list
         sent.push_back(m);
@@ -342,7 +346,7 @@ void ProtocolV1::write_event() {
       }
 
       r = write_message(m, data, more);
-
+      connection->logger->tinc(l_msgr_issued_time_avg, ceph_clock_now() - tp);
       connection->write_lock.lock();
       if (r == 0) {
         ;

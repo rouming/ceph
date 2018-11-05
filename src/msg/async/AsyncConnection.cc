@@ -517,6 +517,7 @@ int AsyncConnection::send_message(Message *m)
   // may disturb users
   logger->inc(l_msgr_send_messages);
 
+  m->set_queued_stamp(ceph_clock_now());
   protocol->send_message(m);
   return 0;
 }

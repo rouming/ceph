@@ -249,6 +249,8 @@ protected:
   utime_t throttle_stamp;
   /* time at which message was fully read */
   utime_t recv_complete_stamp;
+  /* time at which message was submitted to the queue */
+  utime_t queued_stamp;
 
   ConnectionRef connection;
 
@@ -429,6 +431,8 @@ public:
   const utime_t& get_throttle_stamp() const { return throttle_stamp; }
   void set_recv_complete_stamp(utime_t t) { recv_complete_stamp = t; }
   const utime_t& get_recv_complete_stamp() const { return recv_complete_stamp; }
+  void set_queued_stamp(utime_t t) { queued_stamp = t; }
+  const utime_t& get_queued_stamp() const { return queued_stamp; }
 
   void calc_header_crc() {
     header.crc = ceph_crc32c(0, (unsigned char*)&header,
