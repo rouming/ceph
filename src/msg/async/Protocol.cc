@@ -84,6 +84,8 @@ ProtocolV1::ProtocolV1(AsyncConnection *connection)
 ProtocolV1::~ProtocolV1() {
   ceph_assert(out_q.empty());
   ceph_assert(sent.empty());
+  ceph_assert(!out_head);
+  ceph_assert(!out_tail);
 
   delete[] temp_buffer;
 
@@ -240,10 +242,17 @@ void ProtocolV1::send_message(Message *m) {
   if (can_write == WriteStatus::CLOSED) {
     ldout(cct, 10) << __func__ << " connection closed."
                    << " Drop message " << m << dendl;
-    m->put();
+    m->complete();
   } else {
     m->trace.event("async enqueueing message");
-    out_q[m->get_priority()].emplace_back(std::move(bl), m);
+
+    m->next = NULL;
+    if (out_tail)
+      out_tail->next = m;
+    out_tail = m;
+    if (!out_head)
+      out_head = m;
+
     ldout(cct, 15) << __func__ << " inline write is denied, reschedule m=" << m
                    << dendl;
     if (can_write != WriteStatus::REPLACING) {
@@ -320,33 +329,106 @@ void ProtocolV1::write_event() {
     }
 
     auto start = ceph::mono_clock::now();
-    bool more;
     do {
-      bufferlist data;
-      Message *m = _get_next_outgoing(&data);
-      if (!m) {
-        break;
-      }
+      struct iovec iovec[1024];
+      struct msghdr msghdr;
 
-      auto tp = ceph_clock_now();
-      connection->logger->tinc(l_msgr_queued_dequeued_time_avg,
-			       tp - m->get_queued_stamp());
+      Message *msgs_head;
 
-      if (!connection->policy.lossy) {
-        // put on sent list
-        sent.push_back(m);
-        m->get();
-      }
-      more = !out_q.empty();
+      msgs_head = out_head;
+      if (!msgs_head)
+	break;
+
+      out_head = NULL;
+      out_tail = NULL;
+
       connection->write_lock.unlock();
 
-      // send_message or requeue messages may not encode message
-      if (!data.length()) {
-        prepare_send_message(connection->get_features(), m, data);
+      Message *m;
+      auto tp = ceph_clock_now();
+      unsigned buf_cnt = 0, buf_len = 0;
+      for (m = msgs_head; m; m = m->next) {
+	assert(buf_cnt < ARRAY_SIZE(iovec));
+
+	if (!connection->policy.lossy) {
+	  assert(0);
+	  // put on sent list
+	  sent.push_back(m);
+	  m->get();
+	}
+
+	connection->logger->tinc(l_msgr_queued_dequeued_time_avg,
+				 tp - m->get_queued_stamp());
+
+	m->encode(connection->get_features(), messenger->crcflags);
+
+	m->set_seq(++out_seq);
+
+	if (messenger->crcflags & MSG_CRC_HEADER)
+	  m->calc_header_crc();
+
+	ceph_msg_header& header = m->get_header();
+	ceph_msg_footer& footer = m->get_footer();
+
+	iovec[buf_cnt].iov_base = &m->tag;
+	iovec[buf_cnt].iov_len = 1;
+	buf_len += 1;
+	buf_cnt++;
+
+	iovec[buf_cnt].iov_base = &header;
+	iovec[buf_cnt].iov_len = sizeof(header);
+	buf_len += sizeof(header);
+	buf_cnt++;
+
+	for (const auto &pb : m->get_payload().buffers()) {
+	  iovec[buf_cnt].iov_base = (void *)pb.c_str();
+	  iovec[buf_cnt].iov_len = pb.length();
+	  buf_len += pb.length();
+	  buf_cnt++;
+	}
+	for (const auto &pb : m->get_middle().buffers()) {
+	  iovec[buf_cnt].iov_base = (void *)pb.c_str();
+	  iovec[buf_cnt].iov_len = pb.length();
+	  buf_len += pb.length();
+	  buf_cnt++;
+	}
+	for (const auto &pb : m->get_data().buffers()) {
+	  iovec[buf_cnt].iov_base = (void *)pb.c_str();
+	  iovec[buf_cnt].iov_len = pb.length();
+	  buf_len += pb.length();
+	  buf_cnt++;
+	}
+
+	iovec[buf_cnt].iov_base = &footer;
+	iovec[buf_cnt].iov_len = sizeof(footer);
+	buf_len += sizeof(footer);
+	buf_cnt++;
       }
 
-      r = write_message(m, data, more);
-      connection->logger->tinc(l_msgr_issued_time_avg, ceph_clock_now() - tp);
+      assert(buf_cnt < ARRAY_SIZE(iovec));
+
+      memset(&msghdr, 0, sizeof(msghdr));
+      msghdr.msg_iovlen = buf_cnt;
+      msghdr.msg_iov = iovec;
+
+      r = connection->_try_send(msghdr, buf_len);
+      if (r != 0)
+	printf("!!!!!!! >>>>>>>>>>>> @@@@@@@@@ REMAIN r(%zd)\n", r);
+
+      connection->logger->inc(l_msgr_send_bytes, buf_len);
+
+      auto tp2 = ceph_clock_now();
+      for (m = msgs_head; m; ) {
+	Message *next = m->next;
+
+	connection->logger->tinc(l_msgr_issued_time_avg, tp2 - tp);
+
+	//XXX m->put();
+	m->complete();
+
+	m = next;
+      }
+
       connection->write_lock.lock();
       if (r == 0) {
         ;
@@ -363,6 +445,7 @@ void ProtocolV1::write_event() {
       uint64_t left = ack_left;
       if (left) {
         ceph_le64 s;
+	assert(0);
         s = in_seq;
         connection->outcoming_bl.append(CEPH_MSGR_TAG_ACK);
         connection->outcoming_bl.append((char *)&s, sizeof(s));
@@ -409,7 +492,7 @@ void ProtocolV1::write_event() {
 }
 
 bool ProtocolV1::is_queued() {
-  return !out_q.empty() || connection->is_queued();
+  return out_head || !out_q.empty() || connection->is_queued();
 }
 
 void ProtocolV1::run_continuation(CtPtr continuation) {

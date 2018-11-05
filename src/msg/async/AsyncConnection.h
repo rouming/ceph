@@ -60,6 +60,7 @@ class AsyncConnection : public Connection {
   ssize_t write(bufferlist &bl, std::function<void(ssize_t)> callback,
                 bool more=false);
   ssize_t _try_send(bool more=false);
+  ssize_t _try_send(struct msghdr &msghdr, unsigned int buf_len);
 
   void _connect();
   void _stop();

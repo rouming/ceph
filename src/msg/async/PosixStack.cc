@@ -152,6 +152,11 @@ class PosixConnectedSocketImpl final : public ConnectedSocketImpl {
 
     return static_cast<ssize_t>(sent_bytes);
   }
+
+  ssize_t send(struct msghdr &msghdr, unsigned buf_len) override {
+    return do_sendmsg(_fd, msghdr, buf_len, false);
+  }
+
   void shutdown() override {
     ::shutdown(_fd, SHUT_RDWR);
   }

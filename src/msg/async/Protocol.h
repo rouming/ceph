@@ -198,6 +198,8 @@ protected:
   std::list<Message *> sent;  // the first bufferlist need to inject seq
   // priority queue for outbound msgs
   std::map<int, std::list<std::pair<bufferlist, Message *>>> out_q;
+  Message *out_head = NULL;
+  Message *out_tail = NULL;
   bool keepalive;
 
   __u32 connect_seq, peer_global_seq;

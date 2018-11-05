@@ -267,6 +267,9 @@ public:
   void encode_trace(bufferlist &bl, uint64_t features) const;
   void decode_trace(bufferlist::const_iterator &p, bool create = false);
 
+  Message *next = NULL;
+  char tag = CEPH_MSGR_TAG_MSG;
+
   class CompletionHook : public Context {
   protected:
     Message *m;

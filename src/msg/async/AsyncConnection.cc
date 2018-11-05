@@ -332,6 +332,45 @@ ssize_t AsyncConnection::_try_send(bool more)
   return outcoming_bl.length();
 }
 
+// return the remaining bytes, it may larger than the length of ptr
+// else return < 0 means error
+ssize_t AsyncConnection::_try_send(struct msghdr &msghdr, unsigned int buf_len)
+{
+  if (async_msgr->cct->_conf->ms_inject_socket_failures && cs) {
+    if (rand() % async_msgr->cct->_conf->ms_inject_socket_failures == 0) {
+      ldout(async_msgr->cct, 0) << __func__ << " injecting socket failure" << dendl;
+      cs.shutdown();
+    }
+  }
+
+  ceph_assert(center->in_thread());
+  ldout(async_msgr->cct, 25) << __func__ << " cs.send " << buf_len
+                             << " bytes" << dendl;
+  ssize_t r = cs.send(msghdr, buf_len);
+  if (r < 0) {
+    ldout(async_msgr->cct, 1) << __func__ << " send error: " << cpp_strerror(r) << dendl;
+    return r;
+  }
+
+  ldout(async_msgr->cct, 10) << __func__ << " sent bytes " << r
+                             << " remaining bytes " << buf_len - r << dendl;
+
+  if (!open_write && is_queued()) {
+    center->create_file_event(cs.fd(), EVENT_WRITABLE, write_handler);
+    open_write = true;
+  }
+
+  if (open_write && !is_queued()) {
+    center->delete_file_event(cs.fd(), EVENT_WRITABLE);
+    open_write = false;
+    if (writeCallback) {
+      center->dispatch_event_external(write_callback_handler);
+    }
+  }
+
+  return buf_len - r;
+}
+
 void AsyncConnection::inject_delay() {
   if (async_msgr->cct->_conf->ms_inject_internal_delays) {
     ldout(async_msgr->cct, 10) << __func__ << " sleep for " <<
