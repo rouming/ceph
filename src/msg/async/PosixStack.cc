@@ -68,8 +68,11 @@ class PosixConnectedSocketImpl final : public ConnectedSocketImpl {
 
   ssize_t read(char *buf, size_t len) override {
     ssize_t r = ::read(_fd, buf, len);
-    if (r < 0)
+    if (r < 0) {
+//      printf("!!!! %d len=%zd, r=%zd\n", errno, len, r);
+      assert(errno == EWOULDBLOCK);
       r = -errno;
+    }
     return r;
   }
 

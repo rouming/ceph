@@ -330,6 +330,8 @@ public:
       complete_fn(this);
   }
 
+  void *_buffer = NULL;
+
 protected:
   ~Message() override {
     if (byte_throttler)
@@ -337,6 +339,8 @@ protected:
     release_message_throttle();
     trace.event("message destructed");
     /* call completion hooks (if any) */
+//    printf("%s, _buffer=%p\n", __func__, _buffer);
+    free(_buffer);
     if (completion_hook)
       completion_hook->complete(0);
   }
