@@ -469,10 +469,8 @@ static void fio_ceph_msgr_io_u_free(struct thread_data *td, struct io_u *io_u)
 static enum fio_q_status ceph_msgr_sender_queue(struct thread_data *td,
 						struct io_u *io_u)
 {
-  struct ceph_msgr_options *o = (typeof(o))td->eo;
   struct ceph_msgr_data *data;
   struct ceph_msgr_io *io;
-  MOSDOp *req_msg;
 
   bufferlist buflist = bufferlist::static_from_mem(
     (char *)io_u->buf, io_u->buflen);
@@ -480,20 +478,14 @@ static enum fio_q_status ceph_msgr_sender_queue(struct thread_data *td,
   io = (typeof(io))io_u->engine_data;
   data = (typeof(data))td->io_ops_data;
 
-  object_t oid(ptr_to_str(io));
-  pg_t pgid;
-  object_locator_t oloc;
-  hobject_t hobj(oid, oloc.key, CEPH_NOSNAP, pgid.ps(),
-		 pgid.pool(), oloc.nspace);
-  spg_t spgid(pgid);
-  entity_inst_t dest(entity_name_t::OSD(0), hostname_to_addr(o));
-
-  req_msg = new MOSDOp(0, 0, hobj, spgid, 0, 0, 0);
-  req_msg->set_connection(io->data->msgr->get_connection(dest));
+  /* No handy method to clear ops before reusage? Ok */
+  io->req_msg->ops.clear();
 
   /* Here we do not care about direction, always send as write */
-  req_msg->write(0, io_u->buflen, buflist);
-  req_msg->get_connection()->send_message(req_msg);
+  io->req_msg->write(0, io_u->buflen, buflist);
+  /* Keep message alive */
+  io->req_msg->get();
+  io->req_msg->get_connection()->send_message(io->req_msg);
 
   return FIO_Q_QUEUED;
 }
