@@ -167,7 +167,6 @@ ssize_t AsyncConnection::read(unsigned len, char *buffer,
                              << " len=" << len << dendl;
   ssize_t r = read_until(len, buffer);
   if (r > 0) {
-    assert(len == r);
     readCallback = callback;
     pendingReadLen = len;
     read_buffer = buffer;
@@ -382,8 +381,6 @@ void AsyncConnection::inject_delay() {
   }
 }
 
-extern unsigned long long in_read;
-
 void AsyncConnection::process() {
   std::lock_guard<std::mutex> l(lock);
   last_active = ceph::coarse_mono_clock::now();
@@ -459,16 +456,12 @@ void AsyncConnection::process() {
 
     case STATE_CONNECTION_ESTABLISHED: {
       if (pendingReadLen) {
-//	printf(">>> pending %d\n", *pendingReadLen);
         ssize_t r = read(*pendingReadLen, read_buffer, readCallback);
         if (r <= 0) { // read all bytes, or an error occured
           pendingReadLen.reset();
           char *buf_tmp = read_buffer;
           read_buffer = nullptr;
-	  in_read = 0;
           readCallback(buf_tmp, r);
-//	  printf(">>> in_read=%d\n", in_read);
-//	  in_read = 0;
         }
         return;
       }

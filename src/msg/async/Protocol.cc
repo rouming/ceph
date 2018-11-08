@@ -35,13 +35,18 @@ using namespace std;
 
 static void alloc_aligned_buffer(bufferlist &data, unsigned len, unsigned off) {
   // create a buffer to read into that matches the data alignment
-
-  off  = -off & ~CEPH_PAGE_MASK;
-  len += off;
-
-  bufferptr ptr(buffer::create_small_page_aligned(len));
-  ptr.set_offset(off);
-
+  unsigned alloc_len = 0;
+  unsigned left = len;
+  unsigned head = 0;
+  if (off & ~CEPH_PAGE_MASK) {
+    // head
+    alloc_len += CEPH_PAGE_SIZE;
+    head = std::min<uint64_t>(CEPH_PAGE_SIZE - (off & ~CEPH_PAGE_MASK), left);
+    left -= head;
+  }
+  alloc_len += left;
+  bufferptr ptr(buffer::create_small_page_aligned(alloc_len));
+  if (head) ptr.set_offset(CEPH_PAGE_SIZE - head);
   data.push_back(std::move(ptr));
 }
 
@@ -494,21 +499,17 @@ void ProtocolV1::run_continuation(CtPtr continuation) {
   CONTINUATION_RUN(continuation);
 }
 
-unsigned long long in_read;
-
 CtPtr ProtocolV1::read(CONTINUATION_PARAM(next, ProtocolV1, char *, int),
                        int len, char *buffer) {
   if (!buffer) {
     buffer = temp_buffer;
   }
-  in_read += len;
   ssize_t r = connection->read(len, buffer,
                                [CONTINUATION(next), this](char *buffer, int r) {
                                  CONTINUATION(next)->setParams(buffer, r);
                                  CONTINUATION_RUN(CONTINUATION(next));
                                });
   if (r <= 0) {
-//	  printf("    r=%d\n", r);
     return CONTINUE(next, buffer, r);
   }
 
@@ -703,42 +704,32 @@ CtPtr ProtocolV1::handle_message_header(char *buffer, int r) {
 
   ldout(cct, 20) << __func__ << " got MSG header" << dendl;
 
-  current_header = *((ceph_msg_header *)buffer);
+  ceph_msg_header header;
+  header = *((ceph_msg_header *)buffer);
 
-  ldout(cct, 20) << __func__ << " got envelope type=" << current_header.type << " src "
-                 << entity_name_t(current_header.src) << " front=" << current_header.front_len
-                 << " data=" << current_header.data_len << " off " << current_header.data_off
+  ldout(cct, 20) << __func__ << " got envelope type=" << header.type << " src "
+                 << entity_name_t(header.src) << " front=" << header.front_len
+                 << " data=" << header.data_len << " off " << header.data_off
                  << dendl;
 
   if (messenger->crcflags & MSG_CRC_HEADER) {
     __u32 header_crc = 0;
-    header_crc = ceph_crc32c(0, (unsigned char *)&current_header,
-                             sizeof(current_header) - sizeof(current_header.crc));
+    header_crc = ceph_crc32c(0, (unsigned char *)&header,
+                             sizeof(header) - sizeof(header.crc));
     // verify header crc
-    if (header_crc != current_header.crc) {
+    if (header_crc != header.crc) {
       ldout(cct, 0) << __func__ << " got bad header crc " << header_crc
-                    << " != " << current_header.crc << dendl;
+                    << " != " << header.crc << dendl;
       return _fault();
     }
   }
 
   // Reset state
-//  data_buf.clear();
-//  front.clear();
-//  middle.clear();
-//  data.clear();
-//  current_header = header;
-  assert(!current_buffer);
-
-  unsigned int len =
-    current_header.front_len +
-    current_header.middle_len +
-    current_header.data_len +
-    (connection->has_feature(CEPH_FEATURE_MSG_AUTH) ?
-    sizeof(ceph_msg_footer) :
-     sizeof(ceph_msg_footer_old));
-
-  current_buffer = malloc(len);
+  data_buf.clear();
+  front.clear();
+  middle.clear();
+  data.clear();
+  current_header = header;
 
   state = THROTTLE_MESSAGE;
   return CONTINUE(throttle_message);
@@ -835,31 +826,16 @@ CtPtr ProtocolV1::throttle_dispatch_queue() {
   return read_message_front();
 }
 
-#define FULL_READ
-
 CtPtr ProtocolV1::read_message_front() {
   ldout(cct, 20) << __func__ << dendl;
 
-#ifdef FULL_READ
-  unsigned len =
-    current_header.front_len +
-	current_header.middle_len +
-    current_header.data_len +
-    (connection->has_feature(CEPH_FEATURE_MSG_AUTH) ?
-    sizeof(ceph_msg_footer) :
-     sizeof(ceph_msg_footer_old));
-  if (len) {
-//	  printf("##### %s: len=%d\n", __func__, len);
-    return READB(len, (char *)current_buffer, handle_message_footer);
+  unsigned front_len = current_header.front_len;
+  if (front_len) {
+    if (!front.length()) {
+      front.push_back(buffer::create(front_len));
+    }
+    return READB(front_len, front.c_str(), handle_message_front);
   }
-  assert(0);
-#else
-  unsigned len = current_header.front_len;
-  if (len) {
-//	  printf("##### %s: len=%d\n", __func__, len);
-    return READB(len, (char *)current_buffer, handle_message_front);
-  }
-#endif
   return read_message_middle();
 }
 
@@ -871,7 +847,7 @@ CtPtr ProtocolV1::handle_message_front(char *buffer, int r) {
     return _fault();
   }
 
-  ldout(cct, 20) << __func__ << " got front " << current_header.front_len << dendl;
+  ldout(cct, 20) << __func__ << " got front " << front.length() << dendl;
 
   return read_message_middle();
 }
@@ -879,14 +855,15 @@ CtPtr ProtocolV1::handle_message_front(char *buffer, int r) {
 CtPtr ProtocolV1::read_message_middle() {
   ldout(cct, 20) << __func__ << dendl;
 
-  unsigned len = current_header.middle_len;
-  if (len) {
-    return READB(len, (char *)current_buffer + current_header.front_len,
+  if (current_header.middle_len) {
+    if (!middle.length()) {
+      middle.push_back(buffer::create(current_header.middle_len));
+    }
+    return READB(current_header.middle_len, middle.c_str(),
                  handle_message_middle);
   }
 
-  return read_message_data();
-//  return read_message_data_prepare();
+  return read_message_data_prepare();
 }
 
 CtPtr ProtocolV1::handle_message_middle(char *buffer, int r) {
@@ -897,10 +874,9 @@ CtPtr ProtocolV1::handle_message_middle(char *buffer, int r) {
     return _fault();
   }
 
-  ldout(cct, 20) << __func__ << " got middle " << current_header.middle_len << dendl;
+  ldout(cct, 20) << __func__ << " got middle " << middle.length() << dendl;
 
-  return read_message_data();
-//  return read_message_data_prepare();
+  return read_message_data_prepare();
 }
 
 CtPtr ProtocolV1::read_message_data_prepare() {
@@ -914,7 +890,6 @@ CtPtr ProtocolV1::read_message_data_prepare() {
     map<ceph_tid_t, pair<bufferlist, int> >::iterator p =
         connection->rx_buffers.find(current_header.tid);
     if (p != connection->rx_buffers.end()) {
-      assert(0);
       ldout(cct, 10) << __func__ << " seleting rx buffer v " << p->second.second
                      << " at offset " << data_off << " len "
                      << p->second.first.length() << dendl;
@@ -939,22 +914,12 @@ CtPtr ProtocolV1::read_message_data_prepare() {
 CtPtr ProtocolV1::read_message_data() {
   ldout(cct, 20) << __func__ << " msg_left=" << msg_left << dendl;
 
-  unsigned len = current_header.data_len;
-  if (len) {
-    return READB(len, (char *)current_buffer + current_header.front_len +
-		 current_header.middle_len,
-                 handle_message_data);
-  }
-
-
-  /*XXX
   if (msg_left > 0) {
     bufferptr bp = data_blp.get_current_ptr();
     unsigned read_len = std::min(bp.length(), msg_left);
 
     return READB(read_len, bp.c_str(), handle_message_data);
   }
-  */
 
   return read_message_footer();
 }
@@ -966,9 +931,6 @@ CtPtr ProtocolV1::handle_message_data(char *buffer, int r) {
     ldout(cct, 1) << __func__ << " read data error " << dendl;
     return _fault();
   }
-
-  //XXX
-  return read_message_footer();
 
   bufferptr bp = data_blp.get_current_ptr();
   unsigned read_len = std::min(bp.length(), msg_left);
@@ -992,9 +954,7 @@ CtPtr ProtocolV1::read_message_footer() {
     len = sizeof(ceph_msg_footer_old);
   }
 
-  return READB(len, (char *)current_buffer + current_header.front_len +
-	       current_header.middle_len + current_header.data_len,
-	       handle_message_footer);
+  return READ(len, handle_message_footer);
 }
 
 CtPtr ProtocolV1::handle_message_footer(char *buffer, int r) {
@@ -1004,13 +964,6 @@ CtPtr ProtocolV1::handle_message_footer(char *buffer, int r) {
     ldout(cct, 1) << __func__ << " read footer data error " << dendl;
     return _fault();
   }
-
-#ifdef FULL_READ
-  buffer +=
-	  current_header.front_len +
-	  current_header.middle_len +
-	  current_header.data_len;
-#endif
 
   ceph_msg_footer footer;
   ceph_msg_footer_old old_footer;
@@ -1038,32 +991,12 @@ CtPtr ProtocolV1::handle_message_footer(char *buffer, int r) {
   ldout(cct, 20) << __func__ << " got " << front.length() << " + "
                  << middle.length() << " + " << data.length() << " byte message"
                  << dendl;
-
-  bufferlist bl_front, bl_middle, bl_data;
-
-  if (current_header.front_len)
-	  bl_front = bufferlist::static_from_mem(
-		  (char *)current_buffer, current_header.front_len);
-  if (current_header.middle_len)
-	  bl_middle = bufferlist::static_from_mem(
-		  (char *)current_buffer + current_header.front_len,
-		  current_header.middle_len);
-  if (current_header.data_len)
-	  bl_data = bufferlist::static_from_mem(
-		  (char *)current_buffer + current_header.front_len +
-		  current_header.middle_len, current_header.data_len);
-
   Message *message = decode_message(cct, messenger->crcflags, current_header,
-                                    footer, bl_front, bl_middle, bl_data,
-				    connection);
+                                    footer, front, middle, data, connection);
   if (!message) {
     ldout(cct, 1) << __func__ << " decode message failed " << dendl;
     return _fault();
   }
-
-  //XXX
-  message->_buffer = current_buffer;
-  current_buffer = 0;
 
   //
   //  Check the signature if one should be present.  A zero return indicates
@@ -1179,10 +1112,10 @@ CtPtr ProtocolV1::handle_message_footer(char *buffer, int r) {
   }
 
   // clean up local buffer references
-  // data_buf.clear();
-  // front.clear();
-  // middle.clear();
-  // data.clear();
+  data_buf.clear();
+  front.clear();
+  middle.clear();
+  data.clear();
 
   if (need_dispatch_writer && connection->is_connected()) {
     connection->center->dispatch_event_external(connection->write_handler);

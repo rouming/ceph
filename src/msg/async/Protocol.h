@@ -56,13 +56,9 @@ public:
 #define CONTINUATION_RUN(CT)                                      \
   {                                                               \
     Ct<std::remove_reference<decltype(*this)>::type> *_cont = CT; \
-    int loops = 0;						  \
     while (_cont) {                                               \
       _cont = _cont->call(this);                                  \
-      loops++;							  \
     }                                                             \
-    if (0 && loops > 0)						  \
-      printf(">> CONTINUATION_RUN: loops=%d\n", loops);		  \
   }
 
 //////////////////////////////////////////////////////////////////////
@@ -226,7 +222,6 @@ protected:
   unsigned msg_left;
   uint64_t cur_msg_size;
   ceph_msg_header current_header;
-  void *current_buffer = NULL;
   bufferlist data_buf;
   bufferlist::iterator data_blp;
   bufferlist front, middle, data;
