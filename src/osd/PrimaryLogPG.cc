@@ -5832,6 +5832,7 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 
     // munge ZERO -> TRUNCATE?  (don't munge to DELETE or we risk hosing attributes)
     if (op.op == CEPH_OSD_OP_ZERO &&
+	!(op.flags & CEPH_OSD_OP_FLAG_ZERO_NOUNMAP) &&
         obs.exists &&
         op.extent.offset < static_cast<Option::size_t>(osd->osd_max_object_size) &&
         op.extent.length >= 1 &&
@@ -6627,6 +6628,31 @@ int PrimaryLogPG::do_osd_ops(OpContext *ctx, vector<OSDOp>& ops)
 	result = -EOPNOTSUPP;
 	break;
       }
+      if (op.flags & CEPH_OSD_OP_FLAG_ZERO_NOUNMAP) {
+	// ZERO -> WRITE_SAME
+	// Why?  Internally storage backend punches holes on zeroing, but we
+	// need zeroed blocks instead.
+
+	if (osd_op.indata.length()) {
+	  // Zero op with data? No way.
+	  result = -EINVAL;
+	  goto fail;
+	}
+
+	// Extent and writesame layouts are almost similar, so reset union
+	// members which are different
+	op.extent.truncate_size = 0;
+	op.extent.truncate_seq  = 0;
+
+	// Fill in zero data, will be duplicated inside do_writesame()
+	const char buf[2] = {0};
+	osd_op.indata.append(buf, sizeof(buf));
+	op.writesame.data_length = sizeof(buf);
+
+	result = do_writesame(ctx, osd_op);
+	break;
+      }
+
       ++ctx->num_write;
       { // zero
 	result = check_offset_and_length(
