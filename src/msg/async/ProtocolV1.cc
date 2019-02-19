@@ -33,8 +33,6 @@ ostream &ProtocolV1::_conn_prefix(std::ostream *_dout) {
 // it, just a big number.  PLR
 #define SEQ_MASK 0x7fffffff
 
-const int ASYNC_COALESCE_THRESHOLD = 256;
-
 using namespace std;
 
 static void alloc_aligned_buffer(bufferlist &data, unsigned len, unsigned off) {
@@ -217,22 +215,21 @@ void ProtocolV1::fault() {
 }
 
 void ProtocolV1::send_message(Message *m) {
-  bufferlist bl;
   uint64_t f = connection->get_features();
 
   // TODO: Currently not all messages supports reencode like MOSDMap, so here
   // only let fast dispatch support messages prepare message
-  bool can_fast_prepare = messenger->ms_can_fast_dispatch(m);
-  if (can_fast_prepare) {
-    prepare_send_message(f, m, bl);
+  bool encode = messenger->ms_can_fast_dispatch(m);
+  if (encode) {
+    m->encode(f, messenger->crcflags);
   }
 
   std::lock_guard<std::mutex> l(connection->write_lock);
   // "features" changes will change the payload encoding
-  if (can_fast_prepare &&
+  if (encode &&
       (can_write == WriteStatus::NOWRITE || connection->get_features() != f)) {
     // ensure the correctness of message encoding
-    bl.clear();
+    encode = false;
     m->clear_payload();
     ldout(cct, 5) << __func__ << " clear encoded buffer previous " << f
                   << " != " << connection->get_features() << dendl;
@@ -243,34 +240,13 @@ void ProtocolV1::send_message(Message *m) {
     m->put();
   } else {
     m->trace.event("async enqueueing message");
-    out_q[m->get_priority()].emplace_back(std::move(bl), m);
+    out_q[m->get_priority()].emplace_back(m, encode);
     ldout(cct, 15) << __func__ << " inline write is denied, reschedule m=" << m
                    << dendl;
     if (can_write != WriteStatus::REPLACING) {
       connection->center->dispatch_event_external(connection->write_handler);
     }
   }
-}
-
-void ProtocolV1::prepare_send_message(uint64_t features, Message *m,
-                                      bufferlist &bl) {
-  ldout(cct, 20) << __func__ << " m " << *m << dendl;
-
-  // associate message with Connection (for benefit of encode_payload)
-  if (m->empty_payload()) {
-    ldout(cct, 20) << __func__ << " encoding features " << features << " " << m
-                   << " " << *m << dendl;
-  } else {
-    ldout(cct, 20) << __func__ << " half-reencoding features " << features
-                   << " " << m << " " << *m << dendl;
-  }
-
-  // encode and copy out of *m
-  m->encode(features, messenger->crcflags);
-
-  bl.append(m->get_payload());
-  bl.append(m->get_middle());
-  bl.append(m->get_data());
 }
 
 void ProtocolV1::send_keepalive() {
@@ -322,11 +298,15 @@ void ProtocolV1::write_event() {
     auto start = ceph::mono_clock::now();
     bool more;
     do {
-      bufferlist data;
-      Message *m = _get_next_outgoing(&data);
-      if (!m) {
+      list<QueuedMessage> msgs;
+
+      _get_next_outgoing(msgs);
+      if (msgs.empty()) {
         break;
       }
+
+      QueuedMessage &qmsg = *msgs.begin();
+      Message *m = qmsg.msg;
 
       if (!connection->policy.lossy) {
         // put on sent list
@@ -336,12 +316,13 @@ void ProtocolV1::write_event() {
       more = !out_q.empty();
       connection->write_lock.unlock();
 
-      // send_message or requeue messages may not encode message
-      if (!data.length()) {
-        prepare_send_message(connection->get_features(), m, data);
+      /* Encode if not yet done */
+      if (qmsg.msg && !qmsg.encoded) {
+	qmsg.msg->encode(connection->get_features(), messenger->crcflags);
+	qmsg.encoded = true;
       }
 
-      r = write_message(m, data, more);
+      r = write_message(m, more);
 
       connection->write_lock.lock();
       if (r == 0) {
@@ -1073,7 +1054,7 @@ void ProtocolV1::randomize_out_seq() {
   }
 }
 
-ssize_t ProtocolV1::write_message(Message *m, bufferlist &bl, bool more) {
+ssize_t ProtocolV1::write_message(Message *m, bool more) {
   FUNCTRACE(cct);
   ceph_assert(connection->center->in_thread());
   m->set_seq(++out_seq);
@@ -1111,13 +1092,9 @@ ssize_t ProtocolV1::write_message(Message *m, bufferlist &bl, bool more) {
                  << " front=" << header.front_len << " data=" << header.data_len
                  << " off " << header.data_off << dendl;
 
-  if ((bl.length() <= ASYNC_COALESCE_THRESHOLD) && (bl.buffers().size() > 1)) {
-    for (const auto &pb : bl.buffers()) {
-      connection->outcoming_bl.append((char *)pb.c_str(), pb.length());
-    }
-  } else {
-    connection->outcoming_bl.claim_append(bl);
-  }
+  connection->outcoming_bl.append(m->get_payload());
+  connection->outcoming_bl.append(m->get_middle());
+  connection->outcoming_bl.append(m->get_data());
 
   // send footer; if receiver doesn't support signatures, use the old footer
   // format
@@ -1166,14 +1143,14 @@ void ProtocolV1::requeue_sent() {
     return;
   }
 
-  list<pair<bufferlist, Message *> > &rq = out_q[CEPH_MSG_PRIO_HIGHEST];
+  list<QueuedMessage> &rq = out_q[CEPH_MSG_PRIO_HIGHEST];
   out_seq -= sent.size();
   while (!sent.empty()) {
     Message *m = sent.back();
     sent.pop_back();
     ldout(cct, 10) << __func__ << " " << *m << " for resend "
                    << " (" << m->get_seq() << ")" << dendl;
-    rq.push_front(make_pair(bufferlist(), m));
+    rq.emplace_front(m, false);
   }
 }
 
@@ -1183,15 +1160,17 @@ uint64_t ProtocolV1::discard_requeued_up_to(uint64_t out_seq, uint64_t seq) {
   if (out_q.count(CEPH_MSG_PRIO_HIGHEST) == 0) {
     return seq;
   }
-  list<pair<bufferlist, Message *> > &rq = out_q[CEPH_MSG_PRIO_HIGHEST];
+  list<QueuedMessage> &rq = out_q[CEPH_MSG_PRIO_HIGHEST];
   uint64_t count = out_seq;
   while (!rq.empty()) {
-    pair<bufferlist, Message *> p = rq.front();
-    if (p.second->get_seq() == 0 || p.second->get_seq() > seq) break;
-    ldout(cct, 10) << __func__ << " " << *(p.second) << " for resend seq "
-                   << p.second->get_seq() << " <= " << seq << ", discarding"
+    QueuedMessage &qmsg = rq.front();
+    Message *msg = qmsg.msg;
+    if (msg->get_seq() == 0 || msg->get_seq() > seq)
+      break;
+    ldout(cct, 10) << __func__ << " " << *msg << " for resend seq "
+                   << msg->get_seq() << " <= " << seq << ", discarding"
                    << dendl;
-    p.second->put();
+    msg->put();
     rq.pop_front();
     count++;
   }
@@ -1211,13 +1190,13 @@ void ProtocolV1::discard_out_queue() {
     (*p)->put();
   }
   sent.clear();
-  for (map<int, list<pair<bufferlist, Message *> > >::iterator p =
+  for (map<int, list<QueuedMessage> >::iterator p =
            out_q.begin();
        p != out_q.end(); ++p) {
-    for (list<pair<bufferlist, Message *> >::iterator r = p->second.begin();
+    for (list<QueuedMessage>::iterator r = p->second.begin();
          r != p->second.end(); ++r) {
-      ldout(cct, 20) << __func__ << " discard " << r->second << dendl;
-      r->second->put();
+      ldout(cct, 20) << __func__ << " discard " << r->msg << dendl;
+      r->msg->put();
     }
   }
   out_q.clear();
@@ -1264,19 +1243,14 @@ void ProtocolV1::reset_recv_state() {
   }
 }
 
-Message *ProtocolV1::_get_next_outgoing(bufferlist *bl) {
-  Message *m = 0;
+void ProtocolV1::_get_next_outgoing(list<QueuedMessage> &list) {
   if (!out_q.empty()) {
-    map<int, list<pair<bufferlist, Message *> > >::reverse_iterator it =
-        out_q.rbegin();
+    decltype(out_q)::reverse_iterator it = out_q.rbegin();
     ceph_assert(!it->second.empty());
-    list<pair<bufferlist, Message *> >::iterator p = it->second.begin();
-    m = p->second;
-    if (bl) bl->swap(p->first);
-    it->second.erase(p);
-    if (it->second.empty()) out_q.erase(it->first);
+    list.splice(list.end(), it->second, it->second.begin());
+    if (it->second.empty())
+      out_q.erase(it->first);
   }
-  return m;
 }
 
 /**

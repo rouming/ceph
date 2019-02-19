@@ -106,7 +106,7 @@ protected:
   std::atomic<WriteStatus> can_write;
   std::list<Message *> sent;  // the first bufferlist need to inject seq
   // priority queue for outbound msgs
-  std::map<int, std::list<std::pair<bufferlist, Message *>>> out_q;
+  std::map<int, std::list<QueuedMessage>> out_q;
   bool keepalive;
 
   __u32 connect_seq, peer_global_seq;
@@ -194,10 +194,9 @@ protected:
   void session_reset();
   void randomize_out_seq();
 
-  Message *_get_next_outgoing(bufferlist *bl);
+  void _get_next_outgoing(std::list<QueuedMessage> &list);
 
-  void prepare_send_message(uint64_t features, Message *m, bufferlist &bl);
-  ssize_t write_message(Message *m, bufferlist &bl, bool more);
+  ssize_t write_message(Message *m, bool more);
 
   void requeue_sent();
   uint64_t discard_requeued_up_to(uint64_t out_seq, uint64_t seq);

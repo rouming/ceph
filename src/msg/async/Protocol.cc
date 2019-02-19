@@ -7,7 +7,8 @@ Protocol::Protocol(int type, AsyncConnection *connection)
   : proto_type(type),
     connection(connection),
     messenger(connection->async_msgr),
-    cct(connection->async_msgr->cct) {
+    cct(connection->async_msgr->cct),
+    wqueue(messenger, connection) {
   auth_meta.reset(new AuthConnectionMeta());
 }
 

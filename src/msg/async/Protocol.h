@@ -8,6 +8,7 @@
 #include <map>
 
 #include "AsyncConnection.h"
+#include "AsyncMessenger.h"
 #include "include/buffer.h"
 #include "include/msgr.h"
 
@@ -70,7 +71,68 @@ public:
 
 //////////////////////////////////////////////////////////////////////
 
-class AsyncMessenger;
+struct QueuedMessage {
+  Message *msg;
+  unsigned int length;
+  unsigned int pos;
+  bool encoded;
+  char tag;
+  union {
+    ceph_le64 s;
+    struct ceph_timespec ts;
+    ceph_msg_footer_old old_footer;
+  } static_payload;  /* 13 bytes */
+
+  QueuedMessage(Message *msg_, bool encoded_) :
+    msg(msg_),
+    length(0),
+    pos(0),
+    encoded(encoded_),
+    tag(0) {
+  }
+
+  QueuedMessage(char tag_, const void *data_, unsigned int len_) :
+    msg(nullptr),
+    length(len_),
+    pos(0),
+    encoded(true),
+    tag(tag_) {
+    ceph_assert(len_ <= sizeof(static_payload));
+    if (len_)
+      memcpy(&static_payload, data_, len_);
+  }
+
+  ~QueuedMessage() {
+    if (msg)
+      msg->put();
+  }
+};
+
+struct WriteQueue {
+  AsyncMessenger *messenger;
+  AsyncConnection *connection;
+  std::array<struct iovec, IOV_MAX> iovec;
+  decltype(iovec)::iterator iovec_pos;
+  decltype(iovec)::iterator iovec_end;
+
+  std::list<QueuedMessage> msgs;
+  decltype(msgs)::iterator tosend_it;
+
+  WriteQueue(AsyncMessenger *messenger_, AsyncConnection *connection_) :
+    messenger(messenger_),
+    connection(connection_),
+    iovec_pos(iovec.begin()),
+    iovec_end(iovec.begin())
+  {}
+
+  void enqueue(std::list<QueuedMessage> &list) {
+    msgs.splice(msgs.end(), list);
+  }
+
+  void enqueue(char tag, void *data, size_t len) {
+    msgs.emplace_back(tag, data, len);
+  }
+};
 
 class Protocol {
 public:
@@ -79,6 +141,7 @@ protected:
   AsyncConnection *connection;
   AsyncMessenger *messenger;
   CephContext *cct;
+  WriteQueue wqueue;
 public:
   std::shared_ptr<AuthConnectionMeta> auth_meta;
 
@@ -104,7 +167,6 @@ public:
   virtual void read_event() = 0;
   virtual void write_event() = 0;
   virtual bool is_queued() = 0;
-
 };
 
 #endif /* _MSG_ASYNC_PROTOCOL_ */
