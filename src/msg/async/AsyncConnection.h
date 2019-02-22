@@ -36,6 +36,7 @@
 #include "Event.h"
 #include "Stack.h"
 
+class WriteQueue;
 class AsyncMessenger;
 class DispatchQueue;
 class Worker;
@@ -60,6 +61,8 @@ class AsyncConnection : public Connection {
   ssize_t write(bufferlist &bl, std::function<void(ssize_t)> callback,
                 bool more=false);
   ssize_t _try_send(bool more=false);
+
+  ssize_t send(WriteQueue &wqueue);
 
   void _connect();
   void _stop();

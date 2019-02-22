@@ -284,6 +284,383 @@ void ProtocolV1::read_event() {
   }
 }
 
+bool ProtocolV1::flush_out_q() {
+  decltype(out_q)::reverse_iterator rit;
+  bool is_writable;
+
+  connection->write_lock.lock();
+  is_writable = (can_write == WriteStatus::CANWRITE);
+  if (out_q.empty() || !is_writable)
+    goto unlock;
+
+  /* Grab all priorities queues at once */
+  for (rit = out_q.rbegin(); rit != out_q.rend(); ++rit) {
+    auto &list = rit->second;
+    ceph_assert(!list.empty());
+    wqueue.enqueue(list);
+  }
+  /* XXX not nice, why not to keep empty lists in map? FIXME please! */
+  out_q.clear();
+  is_writable = true;
+
+unlock:
+  connection->write_lock.unlock();
+
+  return is_writable;
+}
+
+void ProtocolV1::enqueue_ack() {
+  /* XXX No reason to keep ack_left or in_seq as atomic, FIXME please! */
+  uint64_t left = ack_left;
+  if (left) {
+    ceph_le64 s;
+
+    s = in_seq;
+    wqueue.enqueue(CEPH_MSGR_TAG_ACK, &s, sizeof(s));
+    ldout(cct, 10) << __func__ << " enqueue msg ack, acked " << left
+		   << " messages" << dendl;
+    ack_left -= left;
+  }
+}
+
+void ProtocolV1::enqueue_keepalive() {
+  if (keepalive) {
+    if (keepalive_ts.tv_sec || keepalive_ts.tv_nsec) {
+      wqueue.enqueue(CEPH_MSGR_TAG_KEEPALIVE2_ACK, &keepalive_ts,
+		     sizeof(keepalive_ts));
+      keepalive_ts = {0};
+    } else if (connection->has_feature(CEPH_FEATURE_MSGR_KEEPALIVE2)) {
+      struct ceph_timespec ts;
+      utime_t t = ceph_clock_now();
+      t.encode_timeval(&ts);
+      wqueue.enqueue(CEPH_MSGR_TAG_KEEPALIVE2, &ts, sizeof(ts));
+    } else {
+      wqueue.enqueue(CEPH_MSGR_TAG_KEEPALIVE, NULL, 0);
+    }
+    keepalive = false;
+  }
+}
+
+bufferlist::buffers_t::const_iterator
+WriteQueue::find_buf(const bufferlist::buffers_t &bufs, unsigned int pos)
+{
+  bufferlist::buffers_t::const_iterator it;
+
+  for (it = bufs.begin(); it != bufs.end() && pos; it++) {
+    auto &buf = *it;
+
+    ceph_assert(buf.length() <= pos);
+    pos -= min(buf.length(), pos);
+  }
+  /* No partial buffers */
+  ceph_assert(!pos);
+
+  return it;
+}
+
+struct iovec *
+WriteQueue::fillin_iovec_from_mem(void *mem,
+				  unsigned int &pos,
+				  unsigned int beg,
+				  unsigned int end)
+{
+  struct iovec *iov = &*iovec_end_it;
+
+  iov->iov_len = end - pos;
+  iov->iov_base = (char *)mem + (pos - beg);
+
+  pos += iov->iov_len;
+  iovec_end_it++;
+
+  if (iovec_end_it == iovec.end())
+    return NULL;
+
+  return &*iovec_end_it;
+}
+
+struct iovec *
+WriteQueue::fillin_iovec_from_bufs(const bufferlist::buffers_t &bufs,
+				   unsigned int &pos,
+				   unsigned int beg)
+{
+  bufferlist::buffers_t::const_iterator it;
+  struct iovec *iov = &*iovec_end_it;
+
+  it = find_buf(bufs, pos - beg);
+  ceph_assert(it != bufs.end());
+
+  for (; it != bufs.end(); it++) {
+    auto &buf = *it;
+
+    iov->iov_base = (char *)buf.c_str();
+    iov->iov_len = buf.length();
+
+    pos += iov->iov_len;
+    iovec_end_it++;
+    if (iovec_end_it == iovec.end())
+      return NULL;
+
+    iov = &*iovec_end_it;
+  }
+
+  return iov;
+}
+
+void WriteQueue::prepare_for_write(QueuedMessage *qmsg)
+{
+  Message *m = qmsg->msg;
+
+  ceph_assert(m);
+
+  if (!qmsg->encoded) {
+    m->encode(connection->get_features(), messenger->crcflags);
+    qmsg->encoded = true;
+  }
+
+  //XXX NEED TO THINK ABOUT SEQUENCES
+  m->set_seq(++out_seq);
+
+  /* XXX Why not call things below on message enqueue? */
+
+  if (messenger->crcflags & MSG_CRC_HEADER)
+    m->calc_header_crc();
+
+  /*XXXXX NEED TO THINK HOW TO TAKE THAT FROM PROTO
+  if (session_security) {
+    if (session_security->sign_message(m)) {
+      ldout(cct, 20) << __func__ << " failed to sign m=" << m
+		     << "): sig = " << m->get_footer().sig
+		     << dendl;
+    }
+  }
+  */
+
+  if (!connection->has_feature(CEPH_FEATURE_MSG_AUTH)) {
+    ceph_msg_footer *new_footer;
+    ceph_msg_footer_old *old_footer;
+
+    new_footer = &qmsg->msg->get_footer();
+    old_footer = &qmsg->static_payload.old_footer;
+
+    if (messenger->crcflags & MSG_CRC_HEADER) {
+      old_footer->front_crc  = new_footer->front_crc;
+      old_footer->middle_crc = new_footer->middle_crc;
+      old_footer->data_crc   = new_footer->data_crc;
+    } else {
+      old_footer->front_crc = old_footer->middle_crc = 0;
+    }
+    old_footer->data_crc = messenger->crcflags & MSG_CRC_DATA ?
+      new_footer->data_crc : 0;
+    old_footer->flags = new_footer->flags;
+  }
+}
+
+void WriteQueue::fillin_iovec() {
+  if (iovec_end_it == iovec.end())
+    /* iovec is full, go and flush the data first */
+    return;
+
+  struct iovec *iov = &*iovec_end_it;
+
+  for (; msgs_end_it != msgs.end() && iov; ) {
+    unsigned int header_pos, payload_pos, middle_pos;
+    unsigned int data_pos, footer_pos, end_pos;
+    bool new_footer, to_next = false;
+
+    QueuedMessage *qmsg = &*msgs_end_it;
+    Message *m = qmsg->msg;
+
+    header_pos = sizeof(qmsg->tag);
+
+    if (msg_end_pos < header_pos)
+      iov = fillin_iovec_from_mem(&qmsg->tag, msg_end_pos, 0, header_pos);
+
+    if (!m) {
+      /* Always ready to be sent */
+      ceph_assert(qmsg->length);
+      if (iov) {
+	iov = fillin_iovec_from_mem(&qmsg->static_payload, msg_end_pos,
+				    header_pos, qmsg->length);
+	to_next = true;
+      }
+      /* Done for queued message with static payload only */
+      goto end;
+    }
+
+    if (!qmsg->length)
+      prepare_for_write(qmsg);
+
+    payload_pos = header_pos + sizeof(m->get_header());
+    middle_pos  = payload_pos + m->get_payload().length();
+    data_pos    = middle_pos + m->get_middle().length();
+    footer_pos  = data_pos + m->get_data().length();
+    end_pos     = footer_pos;
+    new_footer  = connection->has_feature(CEPH_FEATURE_MSG_AUTH);
+    end_pos    += new_footer ? sizeof(ceph_msg_footer) :
+                               sizeof(ceph_msg_footer_old);
+    qmsg->length = end_pos;
+
+
+
+    if (iov && msg_end_pos < payload_pos) {
+      iov = fillin_iovec_from_mem(&m->get_header(),
+				  msg_end_pos, header_pos, payload_pos);
+    }
+    if (iov && msg_end_pos < middle_pos) {
+      iov = fillin_iovec_from_bufs(m->get_payload().buffers(),
+				   msg_end_pos, payload_pos);
+    }
+    if (iov && msg_end_pos < data_pos) {
+      iov = fillin_iovec_from_bufs(m->get_middle().buffers(),
+				   msg_end_pos, middle_pos);
+    }
+    if (iov && msg_end_pos < footer_pos) {
+      iov = fillin_iovec_from_bufs(m->get_data().buffers(),
+				   msg_end_pos, data_pos);
+    }
+    if (iov) {
+      void *footer;
+
+      ceph_assert(msg_end_pos < end_pos);
+      footer = new_footer ? (void *)&m->get_footer() :
+			    (void *)&qmsg->static_payload.old_footer;
+      iov = fillin_iovec_from_mem(footer, msg_end_pos, footer_pos, end_pos);
+      to_next = true;
+    }
+end:
+    if (to_next) {
+      /*
+       * Message is fully mapped to iovec, so zero out the offset
+       * and take the next message
+       */
+      msg_end_pos = 0;
+      msgs_end_it++;
+    }
+  }
+}
+
+void WriteQueue::advance(unsigned int size) {
+  unsigned int pos, rest;
+
+  /*
+   * Advance iovec
+   */
+  for (pos = 0; iovec_beg_it != iovec_end_it && pos < size; ) {
+    struct iovec *iov;
+
+    iov = *&iovec_beg_it;
+    rest = min(size - pos, (unsigned int)iov->iov_len);
+    iov->iov_len -= rest;
+    pos += rest;
+    if (iov->iov_len)
+      /* Advance pointer in order to repeat send from that position */
+      iov->iov_base = (char *)iov->iov_base + rest;
+    else
+      iovec_beg_it++;
+  }
+  /* The whole size must be consumed, otherwise blame the caller */
+  ceph_assert(pos == size);
+
+  bool rewind = false;
+
+  if (iovec.begin() != iovec_beg_it && iovec_beg_it < iovec_end_it &&
+      (iovec.end() - iovec_end_it) < (long int)iovec.size() / 2) {
+    /*
+     * We move the remains to the beginning only if the half
+     * of iovec is left just to minimize possible memcopies.
+     */
+    std::memmove(&*iovec.begin(), &*iovec_beg_it,
+		 sizeof(iovec[0])*(iovec_end_it - iovec_beg_it));
+    rewind = true;
+  } else if (iovec_beg_it == iovec_end_it) {
+    rewind = true;
+  }
+  if (rewind) {
+    /* Rewind to the beginning */
+    iovec_end_it = iovec.begin() + (iovec_end_it - iovec_beg_it);
+    iovec_beg_it = iovec.begin();
+  }
+
+  /*
+   * Advance msgs
+   */
+  for (pos = 0; msgs_beg_it != msgs.end() && pos < size; ) {
+    QueuedMessage *qmsg;
+
+    qmsg = &*msgs_beg_it;
+    ceph_assert(msg_beg_pos < qmsg->length);
+    rest = qmsg->length - msg_beg_pos;
+    rest = min(size - pos, rest);
+    msg_beg_pos += rest;
+    pos += rest;
+
+    if (msg_beg_pos == qmsg->length) {
+      msg_beg_pos = 0;
+      msgs_beg_it++;
+    }
+  }
+  /* The whole size must be consumed, otherwise blame the caller */
+  ceph_assert(pos == size);
+
+  if (!lossy)
+    /* If we are not lossy we throw out all sent messages */
+    msgs.erase(msgs.begin(), msgs_beg_it);
+}
+
+void ProtocolV1::write_event() {
+  bool is_writable;
+  int sent = 0;
+
+  ldout(cct, 10) << __func__ << dendl;
+
+  /* Flush the whole out_q to wqueue */
+  is_writable = flush_out_q();
+  if (is_writable) {
+
+    /* Enqueue service messages directly */
+    enqueue_ack();
+    enqueue_keepalive();
+
+    auto start = ceph::mono_clock::now();
+    do {
+      sent = connection->send(wqueue);
+    } while (sent > 0 &&
+	     /* We still have something in messages queue and iovec is empty */
+	     wqueue.has_msgs_to_send() && wqueue.is_iovec_empty());
+
+    connection->logger->tinc(l_msgr_running_send_time,
+			     ceph::mono_clock::now() - start);
+
+    if (sent < 0) {
+      ldout(cct, 1) << __func__ << " send msg failed" << dendl;
+      connection->lock.lock();
+      fault();
+      connection->lock.unlock();
+    }
+  } else {
+    /* Not writable status */
+    connection->lock.lock();
+    connection->write_lock.lock();
+    if (state == STANDBY && !connection->policy.server && is_queued()) {
+      ldout(cct, 10) << __func__ << " policy.server is false" << dendl;
+      connection->_connect();
+    } else if (connection->cs && state != NONE && state != CLOSED &&
+               state != START_CONNECT) {
+      sent = connection->send(wqueue);
+      if (sent < 0) {
+        ldout(cct, 1) << __func__ << " send failed" << dendl;
+        connection->write_lock.unlock();
+        fault();
+        connection->lock.unlock();
+        return;
+      }
+    }
+    connection->write_lock.unlock();
+    connection->lock.unlock();
+  }
+}
+
+#if 0
 void ProtocolV1::write_event() {
   ldout(cct, 10) << __func__ << dendl;
   ssize_t r = 0;
@@ -384,9 +761,10 @@ void ProtocolV1::write_event() {
     connection->lock.unlock();
   }
 }
+#endif
 
 bool ProtocolV1::is_queued() {
-  return !out_q.empty() || connection->is_queued();
+  return !out_q.empty() || wqueue.has_msgs_to_send();
 }
 
 void ProtocolV1::run_continuation(CtPtr continuation) {

@@ -8,7 +8,7 @@ Protocol::Protocol(int type, AsyncConnection *connection)
     connection(connection),
     messenger(connection->async_msgr),
     cct(connection->async_msgr->cct),
-    wqueue(messenger, connection) {
+    wqueue(connection->policy.lossy, messenger, connection) {
   auth_meta.reset(new AuthConnectionMeta());
 }
 

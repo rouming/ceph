@@ -74,7 +74,6 @@ public:
 struct QueuedMessage {
   Message *msg;
   unsigned int length;
-  unsigned int pos;
   bool encoded;
   char tag;
   union {
@@ -86,15 +85,13 @@ struct QueuedMessage {
   QueuedMessage(Message *msg_, bool encoded_) :
     msg(msg_),
     length(0),
-    pos(0),
     encoded(encoded_),
-    tag(0) {
+    tag(CEPH_MSGR_TAG_MSG) {
   }
 
   QueuedMessage(char tag_, const void *data_, unsigned int len_) :
     msg(nullptr),
     length(len_),
-    pos(0),
     encoded(true),
     tag(tag_) {
     ceph_assert(len_ <= sizeof(static_payload));
@@ -109,29 +106,84 @@ struct QueuedMessage {
 };
 
 struct WriteQueue {
+  bool lossy;
   AsyncMessenger *messenger;
   AsyncConnection *connection;
-  std::array<struct iovec, IOV_MAX> iovec;
-  decltype(iovec)::iterator iovec_pos;
-  decltype(iovec)::iterator iovec_end;
+  uint64_t out_seq;
+
+  /*
+   * Before changing iovec capacity, please, do appropriate performance
+   * measurements for all possible sets of block sizes. The value below
+   * was not chosen by chance.
+   */
+  std::array<struct iovec, 64> iovec;
+  decltype(iovec)::iterator iovec_beg_it;
+  decltype(iovec)::iterator iovec_end_it;
 
   std::list<QueuedMessage> msgs;
-  decltype(msgs)::iterator tosend_it;
+  decltype(msgs)::iterator msgs_beg_it;
+  decltype(msgs)::iterator msgs_end_it;
+  unsigned int msg_beg_pos;
+  unsigned int msg_end_pos;
 
-  WriteQueue(AsyncMessenger *messenger_, AsyncConnection *connection_) :
+  WriteQueue(bool lossy_, AsyncMessenger *messenger_,
+	     AsyncConnection *connection_) :
+    lossy(lossy_),
     messenger(messenger_),
     connection(connection_),
-    iovec_pos(iovec.begin()),
-    iovec_end(iovec.begin())
+    out_seq(0),
+    iovec_beg_it(iovec.begin()),
+    iovec_end_it(iovec.begin()),
+    msgs_beg_it(msgs.end()),
+    msgs_end_it(msgs.end()),
+    msg_beg_pos(0),
+    msg_end_pos(0)
   {}
 
+  bool is_iovec_empty() const {
+    return iovec_beg_it == iovec_end_it;
+  }
+
+  bool has_msgs_to_send() const {
+    return msgs_end_it != msgs.end();
+  }
+
   void enqueue(std::list<QueuedMessage> &list) {
+    std::list<QueuedMessage>::iterator beg_it;
+
+    ceph_assert(!list.empty());
+    beg_it = list.begin();
     msgs.splice(msgs.end(), list);
+    if (msgs_beg_it == msgs.end())
+      msgs_beg_it = msgs.begin();
+    if (msgs_end_it == msgs.end())
+      msgs_end_it = beg_it;
   }
 
   void enqueue(char tag, void *data, size_t len) {
     msgs.emplace_back(tag, data, len);
+    if (msgs_beg_it == msgs.end())
+      msgs_beg_it = msgs.begin();
+    if (msgs_end_it == msgs.end())
+      msgs_end_it = --msgs.end();
   }
+
+  bufferlist::buffers_t::const_iterator
+  find_buf(const bufferlist::buffers_t &bufs,
+	   unsigned int pos);
+
+  struct iovec *fillin_iovec_from_mem(void *mem,
+				      unsigned int &pos,
+				      unsigned int beg,
+				      unsigned int end);
+
+  struct iovec *fillin_iovec_from_bufs(const bufferlist::buffers_t &bufs,
+				       unsigned int &pos,
+				       unsigned int beg);
+
+  void prepare_for_write(QueuedMessage *qmsg);
+  void fillin_iovec();
+  void advance(unsigned int size);
 };
 
 class Protocol {
@@ -167,6 +219,14 @@ public:
   virtual void read_event() = 0;
   virtual void write_event() = 0;
   virtual bool is_queued() = 0;
+
+  //XXX
+  inline bool known_priority(unsigned int priority) const {
+    return (priority == CEPH_MSG_PRIO_LOW ||
+	    priority == CEPH_MSG_PRIO_DEFAULT ||
+	    priority == CEPH_MSG_PRIO_HIGH ||
+	    priority == CEPH_MSG_PRIO_HIGHEST);
+  }
 };
 
 #endif /* _MSG_ASYNC_PROTOCOL_ */

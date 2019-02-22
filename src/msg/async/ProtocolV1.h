@@ -255,6 +255,13 @@ private:
   CtPtr handle_in_seq_write(int r);
   CtPtr client_ready();
 
+
+  bool flush_out_q();
+  void enqueue_ack();
+
+  struct ceph_timespec keepalive_ts = {0};
+  void enqueue_keepalive();
+
   // Server Protocol
 protected:
   bool wait_for_seq;

@@ -289,6 +289,10 @@ ssize_t AsyncConnection::write(bufferlist &bl,
                                bool more) {
 
     std::unique_lock<std::mutex> l(write_lock);
+
+    //XXX
+    //need to be handled!
+
     outcoming_bl.claim_append(bl);
     ssize_t r = _try_send(more);
     if (r > 0) {
@@ -334,6 +338,47 @@ ssize_t AsyncConnection::_try_send(bool more)
   }
 
   return outcoming_bl.length();
+}
+
+ssize_t AsyncConnection::send(WriteQueue &wqueue) {
+  struct msghdr msg;
+  ssize_t sent;
+
+  /* Keep iovec always full */
+  wqueue.fillin_iovec();
+  if (wqueue.is_iovec_empty())
+    /* Nothing to send */
+    return 0;
+
+  memset(&msg, 0, sizeof(msg));
+  msg.msg_iov    = &*wqueue.iovec_beg_it;
+  msg.msg_iovlen = wqueue.iovec_end_it - wqueue.iovec_beg_it;
+
+  /* We do not expect EINTR from non-blocking call! */
+  sent = ::sendmsg(cs.fd(), &msg, MSG_DONTWAIT | MSG_NOSIGNAL);
+  if (sent > 0)
+    wqueue.advance(sent);
+  else if (sent < 0 && errno == EAGAIN)
+    /*
+     * Because of dispatch_event_external we can be called at any time,
+     * so handle EAGAIN
+     */
+    sent = 0;
+
+  if (!open_write && wqueue.msgs_beg_it != wqueue.msgs.end()) {
+    center->create_file_event(cs.fd(), EVENT_WRITABLE, write_handler);
+    open_write = true;
+  }
+
+  if (open_write && wqueue.msgs_beg_it == wqueue.msgs.end()) {
+    center->delete_file_event(cs.fd(), EVENT_WRITABLE);
+    open_write = false;
+    if (writeCallback) {
+      center->dispatch_event_external(write_callback_handler);
+    }
+  }
+
+  return sent;
 }
 
 void AsyncConnection::inject_delay() {
