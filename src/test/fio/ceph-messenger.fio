@@ -5,8 +5,9 @@ iodepth=128
 
 ioengine=libfio_ceph_messenger.so
 #ceph_conf_file=ceph-messenger.conf
+ceph_conf_file=/home/roman/devel/ceph-upstream/src/test/fio/ceph-messenger.conf
 
-hostname=127.0.0.1
+hostname=v1:127.0.0.1
 port=5555
 
 ms_type=async+posix # or async+dpdk or async+rdma
