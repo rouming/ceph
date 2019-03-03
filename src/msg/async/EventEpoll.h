@@ -22,7 +22,7 @@
 
 #include "Event.h"
 
-#define EPOLL_USERPOLL_HEADER_MAGIC 0xeb01eb01
+#define EPOLL_USERPOLL_HEADER_MAGIC 0xeb01eb02
 #define EPOLL_USERPOLL_HEADER_SIZE  128
 #define EPOLL_USERPOLL 1
 
@@ -55,14 +55,32 @@ struct epoll_uheader {
 		__attribute__((aligned(EPOLL_USERPOLL_HEADER_SIZE)));
 };
 
+struct epoll_uindex {
+  int64_t ns;
+  uint64_t index;
+};
+
+struct ev {
+  uint64_t ns;
+  uint64_t spins;
+
+  ev(uint64_t ns_, uint64_t spins_) :
+    ns(ns_), spins(spins_) {}
+};
+
 class EpollDriver : public EventDriver {
   int epfd;
   struct epoll_uheader *uheader;
-  unsigned int         *uindex;
+  struct epoll_uindex  *uindex;
 
   struct epoll_event *events;
   CephContext *cct;
   int size;
+
+  std::vector<struct ev> events_ts;
+  uint64_t start_ns = 0;
+  uint64_t end_ns = 0;
+
 
  public:
   explicit EpollDriver(CephContext *c): epfd(-1), events(NULL), cct(c), size(0) {}
@@ -83,6 +101,12 @@ class EpollDriver : public EventDriver {
 
   int uepoll_wait(int ep, struct epoll_event *events,
 		  int maxevents, int timeout);
+  bool read_event(struct epoll_uheader *header,
+		  struct epoll_uindex *index,
+		  unsigned int idx, struct epoll_event *event,
+		  uint64_t now);
+  void append_event_ts(uint64_t now,
+		       uint64_t ns, uint32_t spins);
 };
 
 #endif

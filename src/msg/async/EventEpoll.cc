@@ -26,7 +26,8 @@
 #define BUILD_BUG_ON(condition) ((void )sizeof(char [1 - 2*!!(condition)]))
 #define READ_ONCE(v) (*(volatile decltype(v)*)&(v))
 
-//#define USE_USERPOLL
+#define USE_USERPOLL
+#define SPINS 100
 
 static inline long epoll_create2(int flags, size_t size)
 {
@@ -35,10 +36,11 @@ static inline long epoll_create2(int flags, size_t size)
 
 __attribute__((unused))
 static void uepoll_mmap(int epfd, struct epoll_uheader **_header,
-		       unsigned int **_index)
+			struct epoll_uindex **_index)
 {
 	struct epoll_uheader *header;
-	unsigned int *index, len;
+	struct epoll_uindex *index;
+	unsigned int len;
 
 	len = sysconf(_SC_PAGESIZE);
 again:
@@ -72,8 +74,21 @@ again:
 	*_index = index;
 }
 
+static inline unsigned long long nsecs(void)
+{
+       struct timespec ts = {0, 0};
+
+       clock_gettime(CLOCK_MONOTONIC, &ts);
+       return ((unsigned long long)ts.tv_sec * 1000000000ull) + ts.tv_nsec;
+}
+
+
 int EpollDriver::init(EventCenter *c, int nevent)
 {
+  events_ts.reserve(100000000);
+  /* Start collecting events in 2 secs */
+  start_ns = nsecs() + 2ull * 1000000000ull;
+
   events = (struct epoll_event*)malloc(sizeof(struct epoll_event)*nevent);
   if (!events) {
     lderr(cct) << __func__ << " unable to malloc memory. " << dendl;
@@ -87,7 +102,7 @@ int EpollDriver::init(EventCenter *c, int nevent)
     /* Mmap all pointers */
     uepoll_mmap(epfd, &uheader, &uindex);
     /* XXX */
-    printf("!!!!! USE_USEPOLL\n");
+    printf("!!!!! USE_USEPOLL, spins=%d\n", SPINS);
   }
 
 #else
@@ -147,6 +162,7 @@ int EpollDriver::del_event(int fd, int cur_mask, int delmask)
   int mask = cur_mask & (~delmask);
   int r = 0;
 
+  //XXX
   ee.events = EPOLLET;
   if (mask & EVENT_READABLE) ee.events |= EPOLLIN;
   if (mask & EVENT_WRITABLE) ee.events |= EPOLLOUT;
@@ -177,14 +193,22 @@ int EpollDriver::resize_events(int newsize)
 
 static inline unsigned int max_index_nr(struct epoll_uheader *header)
 {
-	return header->index_length >> 2;
+	return header->index_length >> 4;
 }
 
-static inline bool read_event(struct epoll_uheader *header, unsigned int *index,
-			      unsigned int idx, struct epoll_event *event)
+
+static unsigned long long s_wait_ns;
+static unsigned long long s_spins_nr;
+static unsigned long long s_real_waits_nr;
+static unsigned long long s_nr;
+
+bool EpollDriver::read_event(struct epoll_uheader *header,
+			     struct epoll_uindex *index,
+			     unsigned int idx, struct epoll_event *event,
+			     uint64_t now)
 {
 	struct epoll_uitem *item;
-	unsigned int *item_idx_ptr;
+	struct epoll_uindex *item_idx_ptr;
 	unsigned int indeces_mask;
 
 	indeces_mask = max_index_nr(header) - 1;
@@ -199,7 +223,7 @@ static inline bool read_event(struct epoll_uheader *header, unsigned int *index,
 	/*
 	 * Spin here till we see valid index
 	 */
-	while (!(idx = __atomic_load_n(item_idx_ptr, __ATOMIC_ACQUIRE)))
+	while (!(idx = __atomic_load_n(&item_idx_ptr->index, __ATOMIC_ACQUIRE)))
 		;
 
 	if (idx > header->max_items_nr) {
@@ -215,7 +239,9 @@ static inline bool read_event(struct epoll_uheader *header, unsigned int *index,
 	 * and will refill this pointer only when observes that event is cleared,
 	 * which happens below.
 	 */
-	*item_idx_ptr = 0;
+	item_idx_ptr->index = 0;
+
+	append_event_ts(now, item_idx_ptr->ns, 999999999);
 
 	/*
 	 * Fetch data first, if event is cleared by the kernel we drop the data
@@ -228,15 +254,60 @@ static inline bool read_event(struct epoll_uheader *header, unsigned int *index,
 	return (event->events & ~EPOLLREMOVED);
 }
 
+void EpollDriver::append_event_ts(uint64_t now,
+				  uint64_t ns, uint32_t spins)
+{
+  if (!start_ns || now < start_ns)
+    return;
+
+  if (!end_ns) {
+    end_ns = now + 5ull * 1000000000ull;
+    printf("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$ START COLLECTING EVENTS\n");
+  }
+  else if (now >= end_ns) {
+    char filename[] = "/tmp/events-dump.XXXXXX";
+    int fd = mkstemp(filename);
+    ceph_assert(fd >= 0);
+
+    int64_t comp = 0;
+    for (struct ev &ev : events_ts) {
+      char buf[128];
+      int sz, rc;
+
+      if (!comp)
+	comp = ev.ns;
+
+      sz = snprintf(buf, sizeof(buf), "%ld\t%lu\n", ev.ns - comp, ev.spins);
+      rc = write(fd, buf, sz);
+      ceph_assert(rc == sz);
+    }
+    close(fd);
+
+    printf("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$ STOP COLLECTING EVENTS\n");
+    printf("COLLECTED %ld\n", events_ts.size());
+    start_ns = 0;
+  }
+
+  events_ts.emplace_back(ns, spins);
+}
+
 int EpollDriver::uepoll_wait(int ep, struct epoll_event *events,
 			     int maxevents, int timeout)
 
 {
-	unsigned int spins = 1000000;
+	/*
+	 * Before entering kernel we do busy wait for ~1ms, naively assuming
+	 * each iteration costs 1 cycle, 1 ns.
+	 */
+	unsigned int spins = SPINS;
 	unsigned int tail;
 	int i;
 
+	unsigned long long ns, now;
+
 	assert(maxevents > 0);
+
+	ns = nsecs();
 
 again:
 	/*
@@ -247,21 +318,24 @@ again:
 	tail = READ_ONCE(uheader->tail);
 
 	if (uheader->head == tail && timeout != 0) {
-		if (spins--)
+	        if (spins == SPINS)
+		  append_event_ts(ns, ns, 0);
+
+	        if (spins--)
 			/* Busy loop a bit */
 			goto again;
 
+		s_real_waits_nr++;
 		i = epoll_wait(ep, NULL, 0, timeout);
 		assert(i <= 0);
 		if (i == 0 || (i < 0 && errno != ESTALE))
-			return i;
+			goto out;
 
 		tail = READ_ONCE(uheader->tail);
 		assert(uheader->head != tail);
 	}
-
 	for (i = 0; uheader->head != tail && i < maxevents; uheader->head++) {
-		if (read_event(uheader, uindex, uheader->head, &events[i]))
+	       if (read_event(uheader, uindex, uheader->head, &events[i], ns))
 			i++;
 		else {
 			/*
@@ -269,6 +343,37 @@ again:
 			 * nothing interesting, continue.
 			 */
 		}
+	}
+out:
+	now = nsecs();
+	append_event_ts(ns, now, SPINS - spins + 1);
+
+	s_wait_ns  += now - ns;
+	s_spins_nr += SPINS - spins;
+	s_nr += 1;
+#define WAITS 1000
+
+	if (s_nr == WAITS) {
+
+	  double wait_ns = (double)s_wait_ns / WAITS;
+
+	  double spin_nr = (double)s_spins_nr / WAITS;
+	  spin_nr = spin_nr * 100.0 / SPINS;
+
+	  double real_nr = (double)s_real_waits_nr * 100.0 / WAITS;
+
+
+	  printf(">>>>>>>>>>> wait avg %.3f ns, spins avg %.1f%%, real waits avg %.1f%%\n",
+		 wait_ns, spin_nr, real_nr);
+
+//             volatile int spins = SPINS * real_nr * 2;
+//             while (spins--)
+//                     ;
+
+	  s_wait_ns  = 0;
+	  s_spins_nr = 0;
+	  s_real_waits_nr = 0;
+	  s_nr = 0;
 	}
 
 	return i;
