@@ -866,6 +866,8 @@ EOF
         bluestore fsck on mount = false
 EOF
                 fi
+                ln -s /dev/ram$((osd*3+1)) $CEPH_DEV_DIR/osd$osd/block.db.file
+                ln -s /dev/ram$((osd*3+2)) $CEPH_DEV_DIR/osd$osd/block.wal.file
             fi
 
             local uuid=`uuidgen`
@@ -1170,8 +1172,8 @@ EOF
 
 if [ "$debug" -eq 0 ]; then
     CMONDEBUG='
-        debug mon = 10
-        debug ms = 1'
+        debug mon = 0
+        debug ms = 0'
 else
     debug echo "** going verbose **"
     CMONDEBUG='
