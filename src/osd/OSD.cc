@@ -6995,6 +6995,30 @@ void OSD::ms_fast_dispatch(Message *m)
     return;
   }
 
+  //
+  // Immediately complete requests even without leaving the transport
+  //
+  if (g_conf().get_val<bool>("osd_immediate_completions") &&
+      m->get_type() == CEPH_MSG_OSD_OP) {
+    MOSDOp *osdop = static_cast<MOSDOp*>(m);
+
+    osdop->finish_decode();
+
+    for (auto op : osdop->ops) {
+      if (op.op.op == CEPH_OSD_OP_WRITE &&
+          // Complete big writes only
+          op.op.extent.length >= 4096) {
+        MOSDOpReply *reply;
+
+        reply = new MOSDOpReply(osdop, 0, get_osdmap()->get_epoch(),
+                                CEPH_OSD_FLAG_ACK | CEPH_OSD_FLAG_ONDISK, true);
+        osdop->get_connection()->send_message(reply);
+        m->put();
+        return;
+      }
+    }
+  }
+
   // peering event?
   switch (m->get_type()) {
   case CEPH_MSG_PING:

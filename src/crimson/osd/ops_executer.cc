@@ -766,8 +766,8 @@ OpsExecuter::execute_osd_op(OSDOp& osd_op)
 
   default:
     logger().warn("unknown op {}", ceph_osd_op_name(op.op));
-    throw std::runtime_error(
-      fmt::format("op '{}' not supported", ceph_osd_op_name(op.op)));
+    // Without that `fio examples/rbd.fio` hangs on exit
+    return crimson::ct_error::operation_not_supported::make();
   }
 }
 

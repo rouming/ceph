@@ -22,6 +22,7 @@
 #include "messages/MOSDOp.h"
 #include "messages/MOSDPGLog.h"
 #include "messages/MOSDRepOpReply.h"
+#include "messages/MOSDOpReply.h"
 #include "messages/MPGStats.h"
 
 #include "os/Transaction.h"
@@ -964,6 +965,25 @@ seastar::future<> OSD::committed_osd_maps(version_t first,
 seastar::future<> OSD::handle_osd_op(crimson::net::Connection* conn,
                                      Ref<MOSDOp> m)
 {
+
+  //
+  // Immediately complete requests even without leaving the transport
+  //
+  if (local_conf().get_val<bool>("osd_immediate_completions")) {
+    m->finish_decode();
+
+    for (auto op : m->ops) {
+      if (op.op.op == CEPH_OSD_OP_WRITE &&
+          // Complete big writes only
+          op.op.extent.length >= 4096) {
+
+        auto reply = make_message<MOSDOpReply>(m.get(), 0, osdmap->get_epoch(),
+                                CEPH_OSD_FLAG_ACK | CEPH_OSD_FLAG_ONDISK, true);
+        return conn->send(reply);
+      }
+    }
+  }
+
   shard_services.start_operation<ClientRequest>(
     *this,
     conn->get_shared(),

@@ -1040,7 +1040,11 @@ int MemStore::_write(const coll_t& cid, const ghobject_t& oid,
     return -ENOENT;
 
   ObjectRef o = c->get_or_create_object(oid);
-  if (len > 0 && !cct->_conf->memstore_debug_omit_block_device_write) {
+  if (len > 0 &&
+      (!cct->_conf->memstore_debug_omit_block_device_write ||
+       // We still want cluster meta-data to be saved, so pass only small
+       // writes, expecting user writes will be bigger than 4k.
+       len < 4096)) {
     const ssize_t old_size = o->get_size();
     o->write(offset, bl);
     used_bytes += (o->get_size() - old_size);

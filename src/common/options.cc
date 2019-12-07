@@ -3906,6 +3906,10 @@ std::vector<Option> get_global_options() {
     .set_default(false)
     .set_description(""),
 
+    Option("osd_immediate_completions", Option::TYPE_BOOL, Option::LEVEL_ADVANCED)
+    .set_default(false)
+    .set_description(""),
+
     // --------------------------
     // bluestore
 
