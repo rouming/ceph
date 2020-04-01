@@ -186,3 +186,20 @@ if(HAVE_KEYUTILS)
     secret.c)
   add_library(parse_secret_objs OBJECT ${parse_secret_srcs})
 endif()
+
+add_library(ceph_pech_proxy SHARED
+  environment.cc
+  buffer.cc
+  page.cc
+  armor.c
+  safe_io.c
+  errno.cc
+  ceph_strings.cc
+  strtol.cc
+  ceph_time.cc
+  compat.cc
+  # Meh, but libcls_lock.so needs this
+  ../msg/msg_types.cc
+  ceph_pech_proxy.cc)
+target_link_libraries(ceph_pech_proxy
+  arch crc32)
