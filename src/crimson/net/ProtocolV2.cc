@@ -276,13 +276,15 @@ seastar::future<Tag> ProtocolV2::read_main_preamble()
                      (int)main_preamble.num_segments, main_preamble.crc);
 
       // verify preamble's CRC before any further processing
-      const auto rx_crc = ceph_crc32c(0,
-        reinterpret_cast<const unsigned char*>(&main_preamble),
-        sizeof(main_preamble) - sizeof(main_preamble.crc));
-      if (rx_crc != main_preamble.crc) {
-        logger().warn("{} crc mismatch for main preamble rx_crc={} tx_crc={}",
-                      conn, rx_crc, main_preamble.crc);
-        abort_in_fault();
+      if (messenger.get_crc_flags() & MSG_CRC_HEADER) {
+	const auto rx_crc = ceph_crc32c(0,
+					reinterpret_cast<const unsigned char*>(&main_preamble),
+					sizeof(main_preamble) - sizeof(main_preamble.crc));
+	if (rx_crc != main_preamble.crc) {
+	  logger().warn("{} crc mismatch for main preamble rx_crc={} tx_crc={}",
+			conn, rx_crc, main_preamble.crc);
+	  abort_in_fault();
+	}
       }
 
       // currently we do support between 1 and MAX_NUM_SEGMENTS segments
@@ -355,18 +357,20 @@ seastar::future<> ProtocolV2::read_frame_payload()
       ceph_assert(false);
     } else {
       auto& epilogue = *reinterpret_cast<const epilogue_plain_block_t*>(bl.get());
-      for (std::uint8_t idx = 0; idx < rx_segments_data.size(); idx++) {
-        const __u32 expected_crc = epilogue.crc_values[idx];
-        const __u32 calculated_crc = rx_segments_data[idx].crc32c(-1);
-        if (expected_crc != calculated_crc) {
-          logger().warn("{} message integrity check failed at index {}:"
-                        " expected_crc={} calculated_crc={}",
-                        conn, (unsigned int)idx, expected_crc, calculated_crc);
-          abort_in_fault();
-        } else {
-          logger().trace("{} message integrity check success at index {}: crc={}",
-                         conn, (unsigned int)idx, expected_crc);
-        }
+      if (messenger.get_crc_flags() & MSG_CRC_DATA) {
+	for (std::uint8_t idx = 0; idx < rx_segments_data.size(); idx++) {
+	  const __u32 expected_crc = epilogue.crc_values[idx];
+	  const __u32 calculated_crc = rx_segments_data[idx].crc32c(-1);
+	  if (expected_crc != calculated_crc) {
+	    logger().warn("{} message integrity check failed at index {}:"
+			  " expected_crc={} calculated_crc={}",
+			  conn, (unsigned int)idx, expected_crc, calculated_crc);
+	    abort_in_fault();
+	  } else {
+	    logger().trace("{} message integrity check success at index {}: crc={}",
+			   conn, (unsigned int)idx, expected_crc);
+	  }
+	}
       }
       late_flags = epilogue.late_flags;
     }
