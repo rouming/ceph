@@ -50,24 +50,31 @@ struct ceph_iovec {
   void (*release)(struct ceph_iovec *);
   unsigned long length;
   unsigned long nr_segs;
+  int           refs;
 };
 
-static void ceph_iovec_release(struct ceph_iovec *vec)
+static void ceph_iovec_get(struct ceph_iovec *vec)
 {
-  vec->release(vec);
+  vec->refs++;
+}
+
+static void ceph_iovec_put(struct ceph_iovec *vec)
+{
+  if (!--vec->refs)
+    vec->release(vec);
 }
 
 struct cls_iovec_deleter : public deleter::impl {
   struct ceph_iovec *vec;
-  std::shared_ptr<int> refs;
 
-  cls_iovec_deleter(struct ceph_iovec *vec_, std::shared_ptr<int> &refs_) :
+  cls_iovec_deleter(struct ceph_iovec *vec_) :
     deleter::impl(deleter()),
-    vec(vec_), refs(refs_) {}
+    vec(vec_) {
+    ceph_iovec_get(vec);
+  }
 
   ~cls_iovec_deleter() override {
-    if (!--*refs)
-      ceph_iovec_release(vec);
+    ceph_iovec_put(vec);
   }
 };
 
@@ -77,15 +84,13 @@ static int cls_bl_from_iovec(bufferlist &bl, struct ceph_iovec *vec)
   int ret = 0;
 
   try {
-    std::shared_ptr<int> refs = std::make_shared<int>(vec->nr_segs);
-
     /* Prepare in iovec */
     for (uint32_t i = 0; length && i < vec->nr_segs; i++) {
       const struct iovec *iov = &vec->iovec[i];
       size_t len = min(iov->iov_len, length);
 
       bl.append(buffer::claim_buffer(len, (char *)iov->iov_base,
-                deleter(new cls_iovec_deleter(vec, refs))));
+                deleter(new cls_iovec_deleter(vec))));
 
       length -= len;
     }
@@ -94,28 +99,6 @@ static int cls_bl_from_iovec(bufferlist &bl, struct ceph_iovec *vec)
   }
 
   return ret;
-}
-
-static int cls_bl_to_iovec(struct ceph_iovec *vec, uint32_t num,
-                           const bufferlist &bl)
-{
-  const bufferlist::buffers_t& bufs = bl.buffers();
-  unsigned int i = 0;
-
-  for (auto it = bufs.begin(); it != bufs.end(); ++it, i++) {
-    struct iovec *iov;
-
-	if (i == num)
-		return -EINVAL;
-
-    iov = &vec->iovec[i];
-    iov->iov_base = (void *)it->c_str();
-    iov->iov_len = it->length();
-  }
-  vec->length  = bl.length();
-  vec->nr_segs = i;
-
-  return 0;
 }
 
 struct ceph_cls_call_ctx {
@@ -150,40 +133,32 @@ struct ceph_cls_req_desc {
 };
 
 struct ceph_bufferlist : public ceph_iovec {
-  struct iovec iovecs[8];
+  std::vector<struct iovec> iovecs;
   bufferlist bl;
 
   static void release_iovec(struct ceph_iovec *iovec) {
     delete static_cast<struct ceph_bufferlist *>(iovec);
   }
 
-  ceph_bufferlist()
-  {
-    ceph_iovec::iovec   = iovecs;
-    ceph_iovec::release = release_iovec;
-    ceph_iovec::nr_segs = 0;
-    ceph_iovec::length  = 0;
-  }
-
-  int bl_to_iovec()
+  void bl_to_iovec()
   {
     const bufferlist::buffers_t &bufs = bl.buffers();
     unsigned int i = 0;
 
+    iovecs.resize(bl.get_num_buffers() ?: 1);
+
     for (auto iter = bufs.begin(); iter != bufs.end(); ++iter, i++) {
       struct iovec *iov = &iovecs[i];
-
-      if (i == std::size(iovecs))
-        return -EINVAL;
 
       iov->iov_base = (void *)iter->c_str();
       iov->iov_len = iter->length();
     }
 
-    ceph_iovec::nr_segs = i;
+    ceph_iovec::iovec   = &iovecs[0];
+    ceph_iovec::release = release_iovec;
+    ceph_iovec::nr_segs = bl.get_num_buffers();
     ceph_iovec::length  = bl.length();
-
-    return 0;
+    ceph_iovec::refs    = 1;
   }
 };
 
@@ -204,8 +179,7 @@ static int cls_proxy_cxx_method_call(struct ceph_cls_proxy_call_ctx *proxy_ctx)
       delete out;
       out = NULL;
     } else {
-      ret = out->bl_to_iovec();
-      ceph_assert(!ret);
+      out->bl_to_iovec();
     }
 
     *ctx->out = out;
@@ -251,8 +225,7 @@ static int cls_proxy_c_method_call(struct ceph_cls_proxy_call_ctx *proxy_ctx)
       out = new ceph_bufferlist;
       out->bl.append(buffer::claim_buffer(outdata_len, outdata,
                      deleter(new cls_buf_deleter(outdata))));
-      ret = out->bl_to_iovec();
-      ceph_assert(!ret);
+      out->bl_to_iovec();
 
       *ctx->out = out;
 
@@ -280,31 +253,34 @@ int cls_proxy_method_call(struct ceph_cls_proxy_call_ctx *proxy_ctx)
 
 static int cls_cxx_execute_op(cls_method_context_t hctx,
                               struct ceph_osd_op *op,
-                              const bufferlist &in, bufferlist &out)
+                              bufferlist &in_bl, bufferlist &out_bl)
 {
   struct ceph_iovec *out_vec = NULL;
   struct ceph_cls_call_ctx *ctx;
-  struct iovec in_iov_arr[32];
-  struct ceph_iovec in_iov = {
-    .iovec = in_iov_arr,
-  };
+  ceph_bufferlist *in = NULL;
   int ret;
 
   ctx = reinterpret_cast<ceph_cls_call_ctx *>(hctx);
 
-  /* Prepare in iovec */
-  ret = cls_bl_to_iovec(&in_iov, std::size(in_iov_arr), in);
-  ceph_assert(!ret);
+  try {
+    in = new ceph_bufferlist;
+    in->bl = std::move(in_bl);
+    in->bl_to_iovec();
+  } catch (std::bad_alloc &) {
+    delete in;
+    return -ENOMEM;
+  }
 
-  ret = ctx->ops->execute_op(ctx, op, &in_iov, &out_vec);
+  ret = ctx->ops->execute_op(ctx, op, in, &out_vec);
+  ceph_iovec_put(in);
+
   if (ret)
     return ret;
 
   if (out_vec) {
     /* Claim out buffers */
-    ret = cls_bl_from_iovec(out, out_vec);
-    if (ret)
-      ceph_iovec_release(out_vec);
+    ret = cls_bl_from_iovec(out_bl, out_vec);
+    ceph_iovec_put(out_vec);
   }
 
   return ret;
@@ -517,14 +493,14 @@ int cls_cxx_replace(cls_method_context_t hctx,
 {
   {
     struct ceph_osd_op op = {};
-    bufferlist out;
+    bufferlist in, out;
     int ret;
 
     op.op = CEPH_OSD_OP_TRUNCATE;
     op.extent.offset = 0;
     op.extent.length = 0;
 
-    ret = cls_cxx_execute_op(hctx, &op, bufferlist(), out);
+    ret = cls_cxx_execute_op(hctx, &op, in, out);
     if (ret)
       return ret;
   }
