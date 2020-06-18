@@ -1,6 +1,6 @@
 #include "include/mempool.h"
 #include "include/utime.h"
-#include "rados/objclass.h"
+#include "include/rados/objclass.h"
 #include "common/deleter.h"
 
 #include "objclass/objclass.h"
