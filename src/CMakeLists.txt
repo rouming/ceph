@@ -842,3 +842,21 @@ if (IS_DIRECTORY "${PROJECT_SOURCE_DIR}/.git")
 endif()
 
 add_subdirectory(script)
+
+if(WITH_PECH)
+  include(ExternalProject)
+  ExternalProject_Add(pech-osd
+    SOURCE_DIR ${CMAKE_SOURCE_DIR}/src/pech
+    BUILD_IN_SOURCE 1
+    BUILD_COMMAND env CC=${CMAKE_C_COMPILER} $(MAKE)
+    COMMAND cp ${CMAKE_SOURCE_DIR}/src/pech/pech-osd ${CMAKE_BINARY_DIR}/bin
+    COMMAND cp ${CMAKE_SOURCE_DIR}/src/pech/scripts/pech-config-parser.sh ${CMAKE_BINARY_DIR}/bin
+    COMMAND cp ${CMAKE_SOURCE_DIR}/src/pech/scripts/pech-osd@.service ${CMAKE_BINARY_DIR}/systemd
+    COMMAND cp ${CMAKE_SOURCE_DIR}/src/pech/scripts/fio.service ${CMAKE_BINARY_DIR}/systemd
+    BUILD_ALWAYS 1
+    DOWNLOAD_COMMAND ""
+    UPDATE_COMMAND ""
+    CONFIGURE_COMMAND ""
+    INSTALL_COMMAND "")
+  unset(make_cmd)
+endif(WITH_PECH)
