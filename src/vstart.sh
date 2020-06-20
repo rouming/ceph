@@ -158,6 +158,7 @@ else
     objectstore="bluestore"
 fi
 ceph_osd=ceph-osd
+dont_start_osd=0
 rgw_frontend="beast"
 rgw_compression=""
 lockdep=${LOCKDEP:-1}
@@ -226,6 +227,7 @@ usage=$usage"\t--msgr1: use msgr1 only\n"
 usage=$usage"\t--msgr2: use msgr2 only\n"
 usage=$usage"\t--msgr21: use msgr2 and msgr1\n"
 usage=$usage"\t--crimson: use crimson-osd instead of ceph-osd\n"
+usage=$usage"\t--dont-start-osd: do not start OSDs\n"
 usage=$usage"\t--osd-args: specify any extra osd specific options\n"
 usage=$usage"\t--bluestore-devs: comma-separated list of blockdevs to use for bluestore\n"
 usage=$usage"\t--inc-osd: append some more osds into existing vcluster\n"
@@ -274,6 +276,9 @@ case $1 in
         ;;
     --crimson )
         ceph_osd=crimson-osd
+        ;;
+    --dont-start-osd )
+        dont_start_osd=1
         ;;
     --osd-args )
         extra_osd_args="$2"
@@ -884,16 +889,18 @@ EOF
         key = $OSD_SECRET
 EOF
         fi
-        echo start osd.$osd
-        local osd_pid
-        run 'osd' $osd $SUDO $CEPH_BIN/$ceph_osd \
-            $extra_seastar_args $extra_osd_args \
-            -i $osd $ARGS $COSD_ARGS &
-        osd_pid=$!
-        if $parallel; then
-            osds_wait=$osd_pid
-        else
-            wait $osd_pid
+        if [ $dont_start_osd == 0 ]; then
+            echo start osd.$osd
+            local osd_pid
+            run 'osd' $osd $SUDO $CEPH_BIN/$ceph_osd \
+                $extra_seastar_args $extra_osd_args \
+                -i $osd $ARGS $COSD_ARGS &
+            osd_pid=$!
+            if $parallel; then
+                osds_wait=$osd_pid
+            else
+                wait $osd_pid
+            fi
         fi
     done
     if $parallel; then
