@@ -187,6 +187,7 @@ keyring_fn="$CEPH_CONF_PATH/keyring"
 osdmap_fn="/tmp/ceph_osdmap.$$"
 monmap_fn="/tmp/ceph_monmap.$$"
 inc_osd_num=0
+leaf="0" # 0==osd, 1==host
 
 msgr="21"
 
@@ -233,6 +234,7 @@ usage=$usage"\t--bluestore-devs: comma-separated list of blockdevs to use for bl
 usage=$usage"\t--inc-osd: append some more osds into existing vcluster\n"
 usage=$usage"\t--cephadm: enable cephadm orchestrator with ~/.ssh/id_rsa[.pub]\n"
 usage=$usage"\t--no-parallel: dont start all OSDs in parallel\n"
+usage=$usage"\t--leaf: leaf type, i.e. 'host' or 'osd', 'osd' by default \n"
 
 usage_exit() {
     printf "$usage"
@@ -298,6 +300,16 @@ case $1 in
         ;;
     --no-parallel )
         parallel=false
+        ;;
+    --leaf )
+        if [ "$2" == "osd" ]; then
+            leaf="0"
+        elif [ "$2" == "host" ]; then
+            leaf="1"
+        else
+            usage_exit
+        fi
+        shift
         ;;
     --valgrind )
         [ -z "$2" ] && usage_exit
@@ -601,7 +613,7 @@ prepare_conf() {
         run dir = $CEPH_OUT_DIR
         crash dir = $CEPH_OUT_DIR
         enable experimental unrecoverable data corrupting features = *
-        osd_crush_chooseleaf_type = 0
+        osd_crush_chooseleaf_type = $leaf
         debug asok assert abort = true
 $msgr_conf
 $extra_conf
