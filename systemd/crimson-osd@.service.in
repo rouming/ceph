@@ -1,11 +1,11 @@
 [Unit]
-Description=Ceph object storage daemon osd.%i
+Description=Crimson object storage daemon osd.%i
 After=network-online.target local-fs.target time-sync.target
 Wants=network-online.target local-fs.target time-sync.target
 
 [Service]
 LimitNOFILE=infinity
-ExecStart=/var/lib/ceph/bin/ceph-osd -f -i %i -c /var/lib/ceph/ceph.conf
+ExecStart=/var/lib/ceph/bin/crimson-osd --smp 1 -i %i -c /var/lib/ceph/ceph.conf
 
 Restart=on-failure
 StartLimitBurst=3

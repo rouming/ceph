@@ -10,6 +10,7 @@ foreach(service
     ceph-mgr@
     ceph-mon@
     ceph-osd@
+    crimson-osd@
     ceph-radosgw@
     ceph-rbd-mirror@
     ceph-immutable-object-cache@
