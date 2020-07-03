@@ -1453,6 +1453,9 @@ public:
 
     op_target_t target;
 
+    struct Op *rep_orig;
+    int        rep_refs;
+
     ConnectionRef con;  // for rx buffer only
     uint64_t features;  // explicitly specified op features
 
@@ -1502,6 +1505,8 @@ public:
        ZTracer::Trace *parent_trace = nullptr) :
       session(NULL), incarnation(0),
       target(o, ol, f),
+      rep_orig(NULL),
+      rep_refs(0),
       con(NULL),
       features(CEPH_FEATURES_SUPPORTED_DEFAULT),
       snapid(CEPH_NOSNAP),
@@ -2032,7 +2037,7 @@ public:
 
   bool target_should_be_paused(op_target_t *op);
   int _calc_target(op_target_t *t, Connection *con,
-		   bool any_change = false);
+		   bool any_change = false, bool dont_touch_osd = false);
   int _map_session(op_target_t *op, OSDSession **s,
 		   shunique_lock& lc);
 
@@ -2228,6 +2233,13 @@ private:
   void emit_blacklist_events(const OSDMap::Incremental &inc);
   void emit_blacklist_events(const OSDMap &old_osd_map,
                              const OSDMap &new_osd_map);
+
+  // client based replication
+  bool _acting_osds(op_target_t *t, std::vector<int> &acting);
+  bool _can_replicate_request(Op *op);
+  void _replicate_write_request(Op *op, ceph_tid_t *ptid,
+				int *ctx_budget);
+  Op *_clone_request(Op *src);
 
   // low-level
   void _op_submit(Op *op, shunique_lock& lc, ceph_tid_t *ptid);

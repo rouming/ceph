@@ -1091,7 +1091,8 @@ void Objecter::_scan_requests(
       force_resend_writes = force_resend_writes ||
 	(*pool_full_map)[op->target.base_oloc.pool];
     int r = _calc_target(&op->target,
-			 op->session ? op->session->con.get() : nullptr);
+			 op->session ? op->session->con.get() : nullptr,
+			 false, !!op->rep_orig);
     switch (r) {
     case RECALC_OP_TARGET_NO_ACTION:
       if (!skipped_map && !(force_resend_writes && op->target.respects_full()))
@@ -1290,7 +1291,7 @@ void Objecter::handle_osd_map(MOSDMap *m)
     Op *op = p->second;
     if (op->target.epoch < osdmap->get_epoch()) {
       ldout(cct, 10) << __func__ << "  checking op " << p->first << dendl;
-      int r = _calc_target(&op->target, nullptr);
+      int r = _calc_target(&op->target, nullptr, false, !!op->rep_orig);
       if (r == RECALC_OP_TARGET_POOL_DNE) {
 	p = need_resend.erase(p);
 	_check_op_pool_dne(op, nullptr);
@@ -2253,14 +2254,172 @@ void Objecter::resend_mon_ops()
 
 // read | write ---------------------------
 
-void Objecter::op_submit(Op *op, ceph_tid_t *ptid, int *ctx_budget)
+Objecter::Op *Objecter::_clone_request(Op *orig)
 {
+  std::vector<OSDOp> ops;
+  Op *cpy;
+
+  cpy = new Op(orig->target.base_oid, orig->target.base_oloc,
+               ops, orig->target.flags, NULL, orig->objver);
+  cpy->ops = orig->ops;
+  cpy->outbl = orig->outbl;
+  cpy->snapid = cpy->snapid;
+  cpy->snapc = cpy->snapc;
+  cpy->mtime = cpy->mtime;
+
+  cpy->out_bl.resize(orig->ops.size());
+  cpy->out_rval.resize(orig->ops.size());
+  cpy->out_handler.resize(orig->ops.size());
+  for (unsigned i = 0; i < orig->ops.size(); i++) {
+    cpy->out_bl[i] = NULL;
+    cpy->out_handler[i] = NULL;
+    cpy->out_rval[i] = NULL;
+  }
+
+  return cpy;
+}
+
+bool Objecter::_acting_osds(op_target_t *t, std::vector<int> &acting)
+{
+  bool is_read = t->flags & CEPH_OSD_FLAG_READ;
+  bool is_write = t->flags & CEPH_OSD_FLAG_WRITE;
+
+  object_locator_t target_oloc;
+  object_t target_oid;
+
+  shunique_lock rl(rwlock, ceph::acquire_shared);
+  const pg_pool_t *pi = osdmap->get_pg_pool(t->base_oloc.pool);
+  if (!pi) {
+    return false;
+  }
+
+  // apply tiering
+  target_oid = t->base_oid;
+  target_oloc = t->base_oloc;
+  if ((t->flags & CEPH_OSD_FLAG_IGNORE_OVERLAY) == 0) {
+    if (is_read && pi->has_read_tier())
+      target_oloc.pool = pi->read_tier;
+    if (is_write && pi->has_write_tier())
+      target_oloc.pool = pi->write_tier;
+    pi = osdmap->get_pg_pool(target_oloc.pool);
+    if (!pi) {
+      return false;
+    }
+  }
+
+  pg_t pgid;
+  if (t->precalc_pgid) {
+    ceph_assert(t->flags & CEPH_OSD_FLAG_IGNORE_OVERLAY);
+    ceph_assert(t->base_oid.name.empty()); // make sure this is a pg op
+    ceph_assert(t->base_oloc.pool == (int64_t)t->base_pgid.pool());
+    pgid = t->base_pgid;
+  } else {
+    int ret = osdmap->object_locator_to_pg(target_oid, target_oloc,
+					   pgid);
+    if (ret == -ENOENT) {
+      return false;
+    }
+  }
+
+  unsigned pg_num = pi->get_pg_num();
+  unsigned pg_num_mask = pi->get_pg_num_mask();
+  int up_primary, acting_primary;
+  vector<int> up;
+  ps_t actual_ps = ceph_stable_mod(pgid.ps(), pg_num, pg_num_mask);
+  pg_t actual_pgid(actual_ps, pgid.pool());
+  pg_mapping_t pg_mapping;
+  pg_mapping.epoch = osdmap->get_epoch();
+  if (lookup_pg_mapping(actual_pgid, &pg_mapping)) {
+    up = pg_mapping.up;
+    up_primary = pg_mapping.up_primary;
+    acting = pg_mapping.acting;
+    acting_primary = pg_mapping.acting_primary;
+  } else {
+    osdmap->pg_to_up_acting_osds(actual_pgid, &up, &up_primary,
+                                 &acting, &acting_primary);
+    pg_mapping_t pg_mapping(osdmap->get_epoch(),
+                            up, up_primary, acting, acting_primary);
+    update_pg_mapping(actual_pgid, std::move(pg_mapping));
+  }
+
+  return true;
+}
+
+void Objecter::_replicate_write_request(Op *orig, ceph_tid_t *ptid,
+					int *ctx_budget)
+{
+  std::vector<int> acting;
+  long unsigned int i;
+  bool ret;
+
+  ret = _acting_osds(&orig->target, acting);
+  ceph_assert(ret);
+  ceph_assert(acting.size());
+
+  /* Create requests to other OSDS */
+
+  orig->rep_refs = acting.size();
+  orig->rep_orig = orig;
+  orig->target.osd = acting[acting.size()-1];
+
+  for (i = 0; i < acting.size() - 1; i++) {
+    Op *op;
+
+    op = _clone_request(orig);
+    ceph_assert(op);
+
+    op->rep_orig = orig;
+    op->target.osd = acting[i];
+
+    shunique_lock rl(rwlock, ceph::acquire_shared);
+    op->trace.event("op submit");
+    _op_submit_with_budget(op, rl, NULL);
+  }
+
   shunique_lock rl(rwlock, ceph::acquire_shared);
   ceph_tid_t tid = 0;
   if (!ptid)
     ptid = &tid;
-  op->trace.event("op submit");
-  _op_submit_with_budget(op, rl, ptid, ctx_budget);
+  orig->trace.event("op submit");
+  _op_submit_with_budget(orig, rl, ptid, ctx_budget);
+}
+
+bool Objecter::_can_replicate_request(Op *op)
+{
+  long unsigned int write_ops = 0, nr_ops;
+  long unsigned int other_ops = 0;
+
+  if (!cct->_conf->client_based_replication)
+    return false;
+
+  for (vector<OSDOp>::iterator p = op->ops.begin(); p != op->ops.end(); ++p) {
+    if (p->op.op == CEPH_OSD_OP_WRITE ||
+	p->op.op == CEPH_OSD_OP_WRITEFULL) {
+      write_ops++;
+    } else if (p->op.op == CEPH_OSD_OP_SETALLOCHINT) {
+      /* We include set-alloc-hint to write ops */
+      other_ops++;
+    }
+  }
+  nr_ops = write_ops + other_ops;
+  if (!write_ops || op->ops.size() != nr_ops)
+    return false;
+
+  return true;
+}
+
+void Objecter::op_submit(Op *op, ceph_tid_t *ptid, int *ctx_budget)
+{
+  if (_can_replicate_request(op)) {
+    _replicate_write_request(op, ptid, ctx_budget);
+  } else {
+    shunique_lock rl(rwlock, ceph::acquire_shared);
+    ceph_tid_t tid = 0;
+    if (!ptid)
+      ptid = &tid;
+    op->trace.event("op submit");
+    _op_submit_with_budget(op, rl, ptid, ctx_budget);
+  }
 }
 
 void Objecter::_op_submit_with_budget(Op *op, shunique_lock& sul,
@@ -2376,7 +2535,8 @@ void Objecter::_op_submit(Op *op, shunique_lock& sul, ceph_tid_t *ptid)
   ceph_assert(op->session == NULL);
   OSDSession *s = NULL;
 
-  bool check_for_latest_map = _calc_target(&op->target, nullptr)
+  bool check_for_latest_map = _calc_target(&op->target, nullptr,
+					   false, !!op->rep_orig)
     == RECALC_OP_TARGET_POOL_DNE;
 
   // Try to get a session, including a retry if we need to take write lock
@@ -2394,7 +2554,8 @@ void Objecter::_op_submit(Op *op, shunique_lock& sul, ceph_tid_t *ptid)
       // map changed; recalculate mapping
       ldout(cct, 10) << __func__ << " relock raced with osdmap, recalc target"
 		     << dendl;
-      check_for_latest_map = _calc_target(&op->target, nullptr)
+      check_for_latest_map = _calc_target(&op->target, nullptr,
+					  false, !!op->rep_orig)
 	== RECALC_OP_TARGET_POOL_DNE;
       if (s) {
 	put_session(s);
@@ -2756,7 +2917,9 @@ void Objecter::_prune_snapc(
   }
 }
 
-int Objecter::_calc_target(op_target_t *t, Connection *con, bool any_change)
+int Objecter::_calc_target(op_target_t *t, Connection *con,
+			   bool any_change,
+			   bool dont_touch_osd)
 {
   // rwlock is locked
   bool is_read = t->flags & CEPH_OSD_FLAG_READ;
@@ -2966,7 +3129,8 @@ int Objecter::_calc_target(op_target_t *t, Connection *con, bool any_change)
       } else {
 	osd = acting_primary;
       }
-      t->osd = osd;
+      if (!dont_touch_osd)
+	t->osd = osd;
     }
   }
   if (legacy_change || unpaused || force_resend) {
@@ -3172,6 +3336,9 @@ MOSDOp *Objecter::_prepare_osd_op(Op *op)
 
   if (!honor_pool_full)
     flags |= CEPH_OSD_FLAG_FULL_FORCE;
+
+  if (op->rep_orig)
+    flags |= CEPH_OSD_FLAG_DONT_REPLICATE;
 
   op->target.paused = false;
   op->stamp = ceph::coarse_mono_clock::now();
@@ -3526,7 +3693,14 @@ void Objecter::handle_osd_op_reply(MOSDOpReply *m)
   // NOTE: we assume that since we only request ONDISK ever we will
   // only ever get back one (type of) ack ever.
 
-  if (op->onfinish) {
+  bool can_complete = false;
+  Op *orig = op->rep_orig;
+  if (orig) {
+    ceph_assert(orig->rep_refs);
+    can_complete = !__atomic_sub_fetch(&orig->rep_refs, 1, __ATOMIC_RELAXED);
+  }
+
+  if (op != orig && op->onfinish) {
     num_in_flight--;
     onfinish = op->onfinish;
     op->onfinish = NULL;
@@ -3537,7 +3711,9 @@ void Objecter::handle_osd_op_reply(MOSDOpReply *m)
   auto completion_lock = s->get_lock(op->target.base_oid);
 
   ldout(cct, 15) << "handle_osd_op_reply completed tid " << tid << dendl;
-  _finish_op(op, 0);
+
+  if (op != orig)
+    _finish_op(op, 0);
 
   ldout(cct, 5) << num_in_flight << " in flight" << dendl;
 
@@ -3556,6 +3732,43 @@ void Objecter::handle_osd_op_reply(MOSDOpReply *m)
   }
 
   m->put();
+
+  /* Client based replication, "easy" way */
+  if (can_complete) {
+    ceph_assert(orig);
+
+    ConnectionRef con = orig->session->con;
+    auto priv = con->get_priv();
+    auto s = static_cast<OSDSession*>(priv.get());
+    ceph_assert(s);
+    ceph_assert(s->con == con);
+
+    OSDSession::unique_lock sl(s->lock);
+
+    if (orig->onfinish) {
+      num_in_flight--;
+      onfinish = orig->onfinish;
+      orig->onfinish = NULL;
+    }
+
+    /* get it before we call _finish_op() */
+    auto completion_lock = s->get_lock(orig->target.base_oid);
+
+    _finish_op(orig, 0);
+
+    // serialize completions
+    if (completion_lock.mutex()) {
+      completion_lock.lock();
+    }
+    sl.unlock();
+
+    if (onfinish)
+      onfinish->complete(rc);
+
+    if (completion_lock.mutex()) {
+      completion_lock.unlock();
+    }
+  }
 }
 
 void Objecter::handle_osd_backoff(MOSDBackoff *m)

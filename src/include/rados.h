@@ -471,6 +471,8 @@ enum {
 	CEPH_OSD_FLAG_FULL_FORCE = 0x1000000,  /* force op despite full flag */
 	CEPH_OSD_FLAG_IGNORE_REDIRECT = 0x2000000,  /* ignore redirection */
 	CEPH_OSD_FLAG_RETURNVEC = 0x4000000, /* allow overall result >= 0, and return >= 0 and buffer for each op in opvec */
+
+	CEPH_OSD_FLAG_DONT_REPLICATE = 0x10000000,  /* do not replicate */
 };
 
 enum {
